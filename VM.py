@@ -359,8 +359,8 @@ def vocal_embed():
     em = discord.Embed(title="🎙️  Vocal", color=embed_color())
     em.description = (
         f"```\n"
-        f"{p}mv @user #salon    → Déplacer un user en voc\n"
-        f"{p}find @user         → Trouver un user en voc\n"
+        f"{p}mv @user/@id [#salon] → Déplacer un user (salon optionnel si t'es en voc)\n"
+        f"{p}find @user/@id        → Trouver un user en voc\n"
         f"{p}voc / {p}vc          → Stats vocales du serveur\n"
         f"{p}bringall           → Ramener tout le monde dans ta voc\n"
         f"```"
@@ -389,8 +389,8 @@ def laisse_embed():
     em = discord.Embed(title="🐕  Laisse", color=embed_color())
     em.description = (
         f"```\n"
-        f"{p}laisse @user    → Mettre quelqu'un en laisse\n"
-        f"{p}unleash @user   → Retirer la laisse\n"
+        f"{p}laisse @user/@id  → Mettre quelqu'un en laisse\n"
+        f"{p}unlaisse @user/@id → Retirer la laisse\n"
         f"```\n"
         f"ℹ️ La personne en laisse suit automatiquement le propriétaire en voc.\n"
         f"Son pseudo devient : `pseudo (🐕 de [toi])`"
@@ -596,13 +596,36 @@ async def _unwl(ctx, member: discord.Member = None):
 # ========================= VOCAL =========================
 
 @bot.command(name="mv")
-async def _mv(ctx, member: discord.Member = None, channel: discord.VoiceChannel = None):
+async def _mv(ctx, user_input: str = None, channel: discord.VoiceChannel = None):
     if not has_min_rank(ctx.author.id, 1):
         return await ctx.send(embed=error_embed("❌ Permission refusée", "**Whitelist+** requis."))
-    if member is None or channel is None:
-        return await ctx.send(embed=error_embed("Arguments manquants", "Usage : `=mv @user #salon`"))
+    if user_input is None:
+        return await ctx.send(embed=error_embed("Argument manquant", "Usage : `=mv @user` ou `=mv @user #salon`"))
+
+    # Résolution membre par mention ou ID
+    member = None
+    try:
+        member_id = int(user_input.strip("<@!>"))
+        member = ctx.guild.get_member(member_id)
+    except:
+        pass
+    if member is None:
+        try:
+            member = await commands.MemberConverter().convert(ctx, user_input)
+        except:
+            pass
+    if member is None:
+        return await ctx.send(embed=error_embed("❌ Introuvable", "Impossible de trouver cet utilisateur."))
+
     if not member.voice:
         return await ctx.send(embed=error_embed("❌ Pas en vocal", f"{member.mention} n'est pas dans une voc."))
+
+    # Si pas de salon précisé, utilise la voc de l'auteur
+    if channel is None:
+        if not ctx.author.voice:
+            return await ctx.send(embed=error_embed("❌ Salon manquant", "Précise un salon ou rejoins une voc."))
+        channel = ctx.author.voice.channel
+
     try:
         await member.move_to(channel)
         await ctx.send(embed=success_embed("✅ Déplacé", f"{member.mention} a été déplacé dans **{channel.name}**."))
@@ -612,11 +635,26 @@ async def _mv(ctx, member: discord.Member = None, channel: discord.VoiceChannel 
 
 
 @bot.command(name="find")
-async def _find(ctx, member: discord.Member = None):
+async def _find(ctx, *, user_input: str = None):
     if not has_min_rank(ctx.author.id, 1):
         return await ctx.send(embed=error_embed("❌ Permission refusée", "**Whitelist+** requis."))
+    if user_input is None:
+        return await ctx.send(embed=error_embed("Argument manquant", "Mentionne un utilisateur ou donne son ID."))
+
+    member = None
+    try:
+        member_id = int(user_input.strip("<@!>"))
+        member = ctx.guild.get_member(member_id)
+    except:
+        pass
     if member is None:
-        return await ctx.send(embed=error_embed("Argument manquant", "Mentionne un utilisateur."))
+        try:
+            member = await commands.MemberConverter().convert(ctx, user_input)
+        except:
+            pass
+    if member is None:
+        return await ctx.send(embed=error_embed("❌ Introuvable", "Impossible de trouver cet utilisateur."))
+
     if not member.voice:
         return await ctx.send(embed=error_embed("❌ Pas en vocal", f"{member.mention} n'est actuellement dans aucune voc."))
     vc = member.voice.channel
@@ -647,7 +685,8 @@ async def _voc(ctx):
     muted = total_in_vc - active
 
     em = discord.Embed(title=f"🎙️ Stats vocales — {guild.name}", color=embed_color())
-    em.set_thumbnail(url=guild.icon.url if guild.icon else discord.Embed.Empty)
+    if guild.icon:
+        em.set_thumbnail(url=guild.icon.url)
     em.add_field(name="👥 Membres total", value=f"`{total_members}`", inline=True)
     em.add_field(name="🚀 Boosts", value=f"`{total_boosts}`", inline=True)
     em.add_field(name="\u200b", value="\u200b", inline=True)
@@ -698,6 +737,8 @@ async def _bringall(ctx):
 async def _pv(ctx):
     if not has_min_rank(ctx.author.id, 1):
         return await ctx.send(embed=error_embed("❌ Permission refusée", "**Whitelist+** requis."))
+
+    # Cherche la voc de l'auteur même s'il écrit depuis un autre salon
     if not ctx.author.voice:
         return await ctx.send(embed=error_embed("❌ Pas en vocal", "Tu dois être dans une voc pour la rendre privée."))
 
@@ -706,13 +747,13 @@ async def _pv(ctx):
         return await ctx.send(embed=error_embed("Déjà privé", "Ce salon est déjà privé."))
 
     try:
-        await vc.set_permissions(ctx.guild.default_role, connect=False)
-        await vc.set_permissions(ctx.author, connect=True)
+        # On NE touche PAS aux permissions de connexion
+        # On enregistre juste la voc comme privée, le kick se fait via on_voice_state_update
         add_private_vc(vc.id, ctx.author.id, ctx.guild.id)
-        await ctx.send(embed=success_embed("🔒 Salon privé", f"{vc.mention} est maintenant **privé**.\nUtilise `=acces @user` pour donner l'accès."))
+        await ctx.send(embed=success_embed("🔒 Salon privé", f"{vc.mention} est maintenant **privé**.\nLes non-autorisés seront kickés automatiquement.\nUtilise `=acces @user` pour donner l'accès."))
         await send_log(ctx.guild, "Salon privé", ctx.author, desc=f"Salon : {vc.name}", color=0xfaa61a)
-    except discord.Forbidden:
-        await ctx.send(embed=error_embed("❌ Permission manquante", "Je n'ai pas la permission de modifier ce salon."))
+    except Exception as e:
+        await ctx.send(embed=error_embed("❌ Erreur", str(e)))
 
 
 @bot.command(name="unpv")
@@ -743,12 +784,11 @@ async def _unpv(ctx, channel_id: str = None):
         return await ctx.send(embed=error_embed("❌ Permission refusée", "Seul le propriétaire du salon ou un **Sys+** peut retirer le privé."))
 
     try:
-        await vc.set_permissions(ctx.guild.default_role, connect=None)
         remove_private_vc(vc.id)
         await ctx.send(embed=success_embed("🔓 Salon public", f"{vc.mention} est maintenant **public**."))
         await send_log(ctx.guild, "Salon rendu public", ctx.author, desc=f"Salon : {vc.name}", color=0x43b581)
-    except discord.Forbidden:
-        await ctx.send(embed=error_embed("❌ Permission manquante", "Je n'ai pas la permission de modifier ce salon."))
+    except Exception as e:
+        await ctx.send(embed=error_embed("❌ Erreur", str(e)))
 
 
 @bot.command(name="acces")
@@ -768,21 +808,33 @@ async def _acces(ctx, member: discord.Member = None):
         return await ctx.send(embed=error_embed("❌ Permission refusée", "Seul le propriétaire peut donner l'accès."))
 
     add_vc_access(vc.id, member.id)
-    try:
-        await vc.set_permissions(member, connect=True)
-    except:
-        pass
     await ctx.send(embed=success_embed("✅ Accès accordé", f"{member.mention} peut maintenant rejoindre {vc.mention}."))
 
 
 # ========================= LAISSE =========================
 
 @bot.command(name="laisse")
-async def _laisse(ctx, member: discord.Member = None):
+async def _laisse(ctx, *, user_input: str = None):
     if not has_min_rank(ctx.author.id, 1):
         return await ctx.send(embed=error_embed("❌ Permission refusée", "**Whitelist+** requis."))
+    if user_input is None:
+        return await ctx.send(embed=error_embed("Argument manquant", "Mentionne un utilisateur ou donne son ID."))
+
+    # Résolution membre par mention ou ID
+    member = None
+    try:
+        member_id = int(user_input.strip("<@!>"))
+        member = ctx.guild.get_member(member_id)
+    except:
+        pass
     if member is None:
-        return await ctx.send(embed=error_embed("Argument manquant", "Mentionne un utilisateur."))
+        try:
+            member = await commands.MemberConverter().convert(ctx, user_input)
+        except:
+            pass
+    if member is None:
+        return await ctx.send(embed=error_embed("❌ Introuvable", "Impossible de trouver cet utilisateur."))
+
     if member == ctx.author:
         return await ctx.send(embed=error_embed("❌ Erreur", "Tu ne peux pas te mettre toi-même en laisse."))
     if get_leash(member.id):
@@ -806,18 +858,32 @@ async def _laisse(ctx, member: discord.Member = None):
     await send_log(ctx.guild, "Laisse", ctx.author, member, color=0xfaa61a)
 
 
-@bot.command(name="unleash")
-async def _unleash(ctx, member: discord.Member = None):
+@bot.command(name="unlaisse", aliases=["unleash"])
+async def _unlaisse(ctx, *, user_input: str = None):
     if not has_min_rank(ctx.author.id, 1):
         return await ctx.send(embed=error_embed("❌ Permission refusée", "**Whitelist+** requis."))
+    if user_input is None:
+        return await ctx.send(embed=error_embed("Argument manquant", "Mentionne un utilisateur ou donne son ID."))
+
+    # Résolution membre par mention ou ID
+    member = None
+    try:
+        member_id = int(user_input.strip("<@!>"))
+        member = ctx.guild.get_member(member_id)
+    except:
+        pass
     if member is None:
-        return await ctx.send(embed=error_embed("Argument manquant", "Mentionne un utilisateur."))
+        try:
+            member = await commands.MemberConverter().convert(ctx, user_input)
+        except:
+            pass
+    if member is None:
+        return await ctx.send(embed=error_embed("❌ Introuvable", "Impossible de trouver cet utilisateur."))
 
     leash = get_leash(member.id)
     if not leash:
         return await ctx.send(embed=error_embed("Pas en laisse", f"{member.mention} n'est pas en laisse."))
 
-    # Seul le owner de la laisse ou un Sys+ peut retirer
     if str(ctx.author.id) != leash["owner_id"] and not has_min_rank(ctx.author.id, 3):
         return await ctx.send(embed=error_embed("❌ Permission refusée", "Seul le propriétaire de la laisse ou un **Sys+** peut la retirer."))
 
