@@ -429,10 +429,10 @@ def hierarchy_embed():
     em = discord.Embed(title="📋  Hiérarchie", color=embed_color())
     em.description = (
         "```\nBuyer > Sys > Owner > Whitelist > Aucun\n```\n\n"
-        "> 👑 **Buyer** — Accès total, ajouter/retirer sys\n"
-        "> 🔧 **Sys** — Ajouter/retirer owner & wl\n"
-        "> ⭐ **Owner** — Ajouter/retirer wl\n"
-        "> ✅ **Wl** — Accès aux commandes de base\n\n"
+        "> 👑 **Buyer** — Accès total + `=prefix`, `=setlog`, `=sys`/`=unsys`\n"
+        "> 🔧 **Sys** — `=bringall`, `=owner`/`=unowner`, `=unpv <id>`, `=unlaisse` (toutes)\n"
+        "> ⭐ **Owner** — `=mv`, `=pv`/`=unpv`/`=acces`, `=laisse`/`=unlaisse`, `=wl`/`=unwl`\n"
+        "> ✅ **Wl** — `=find`, `=voc`/`=vc`\n\n"
         "ℹ️ Un rang ne peut **jamais** agir sur quelqu'un de rang égal ou supérieur."
     )
     em.set_footer(text="Made by gp ・ Voice Master")
@@ -597,8 +597,8 @@ async def _unwl(ctx, member: discord.Member = None):
 
 @bot.command(name="mv")
 async def _mv(ctx, user_input: str = None, channel: discord.VoiceChannel = None):
-    if not has_min_rank(ctx.author.id, 1):
-        return await ctx.send(embed=error_embed("❌ Permission refusée", "**Whitelist+** requis."))
+    if not has_min_rank(ctx.author.id, 2):
+        return await ctx.send(embed=error_embed("❌ Permission refusée", "**Owner+** requis."))
     if user_input is None:
         return await ctx.send(embed=error_embed("Argument manquant", "Usage : `=mv @user` ou `=mv @user #salon`"))
 
@@ -669,6 +669,8 @@ async def _find(ctx, *, user_input: str = None):
 
 @bot.command(name="voc", aliases=["vc"])
 async def _voc(ctx):
+    if not has_min_rank(ctx.author.id, 1):
+        return await ctx.send(embed=error_embed("❌ Permission refusée", "**Whitelist+** requis."))
     guild = ctx.guild
     total_members = guild.member_count
     total_boosts = guild.premium_subscription_count
@@ -701,8 +703,8 @@ async def _voc(ctx):
 
 @bot.command(name="bringall")
 async def _bringall(ctx):
-    if not has_min_rank(ctx.author.id, 1):
-        return await ctx.send(embed=error_embed("❌ Permission refusée", "**Whitelist+** requis."))
+    if not has_min_rank(ctx.author.id, 3):
+        return await ctx.send(embed=error_embed("❌ Permission refusée", "**Sys+** requis."))
     if not ctx.author.voice:
         return await ctx.send(embed=error_embed("❌ Pas en vocal", "Tu dois être dans une voc pour utiliser cette commande."))
 
@@ -735,8 +737,8 @@ async def _bringall(ctx):
 
 @bot.command(name="pv")
 async def _pv(ctx):
-    if not has_min_rank(ctx.author.id, 1):
-        return await ctx.send(embed=error_embed("❌ Permission refusée", "**Whitelist+** requis."))
+    if not has_min_rank(ctx.author.id, 2):
+        return await ctx.send(embed=error_embed("❌ Permission refusée", "**Owner+** requis."))
 
     # Cherche la voc de l'auteur même s'il écrit depuis un autre salon
     if not ctx.author.voice:
@@ -758,11 +760,13 @@ async def _pv(ctx):
 
 @bot.command(name="unpv")
 async def _unpv(ctx, channel_id: str = None):
-    if not has_min_rank(ctx.author.id, 1):
-        return await ctx.send(embed=error_embed("❌ Permission refusée", "**Whitelist+** requis."))
+    if not has_min_rank(ctx.author.id, 2):
+        return await ctx.send(embed=error_embed("❌ Permission refusée", "**Owner+** requis."))
 
     if channel_id:
-        # Retirer le pv d'un salon via ID
+        # Retirer le pv d'un autre salon via ID → Sys+ requis
+        if not has_min_rank(ctx.author.id, 3):
+            return await ctx.send(embed=error_embed("❌ Permission refusée", "**Sys+** requis pour retirer le privé d'un autre salon."))
         try:
             vc = ctx.guild.get_channel(int(channel_id))
         except:
@@ -793,8 +797,8 @@ async def _unpv(ctx, channel_id: str = None):
 
 @bot.command(name="acces")
 async def _acces(ctx, member: discord.Member = None):
-    if not has_min_rank(ctx.author.id, 1):
-        return await ctx.send(embed=error_embed("❌ Permission refusée", "**Whitelist+** requis."))
+    if not has_min_rank(ctx.author.id, 2):
+        return await ctx.send(embed=error_embed("❌ Permission refusée", "**Owner+** requis."))
     if member is None:
         return await ctx.send(embed=error_embed("Argument manquant", "Mentionne un utilisateur."))
     if not ctx.author.voice:
@@ -815,8 +819,8 @@ async def _acces(ctx, member: discord.Member = None):
 
 @bot.command(name="laisse")
 async def _laisse(ctx, *, user_input: str = None):
-    if not has_min_rank(ctx.author.id, 1):
-        return await ctx.send(embed=error_embed("❌ Permission refusée", "**Whitelist+** requis."))
+    if not has_min_rank(ctx.author.id, 2):
+        return await ctx.send(embed=error_embed("❌ Permission refusée", "**Owner+** requis."))
     if user_input is None:
         return await ctx.send(embed=error_embed("Argument manquant", "Mentionne un utilisateur ou donne son ID."))
 
@@ -860,8 +864,8 @@ async def _laisse(ctx, *, user_input: str = None):
 
 @bot.command(name="unlaisse", aliases=["unleash"])
 async def _unlaisse(ctx, *, user_input: str = None):
-    if not has_min_rank(ctx.author.id, 1):
-        return await ctx.send(embed=error_embed("❌ Permission refusée", "**Whitelist+** requis."))
+    if not has_min_rank(ctx.author.id, 2):
+        return await ctx.send(embed=error_embed("❌ Permission refusée", "**Owner+** requis."))
     if user_input is None:
         return await ctx.send(embed=error_embed("Argument manquant", "Mentionne un utilisateur ou donne son ID."))
 
