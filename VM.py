@@ -686,17 +686,21 @@ async def _voc(ctx):
     active = sum(1 for m in all_vc_members if m.voice and not m.voice.self_mute and not m.voice.mute)
     muted = total_in_vc - active
 
-    em = discord.Embed(title=f"🎙️ Stats vocales — {guild.name}", color=embed_color())
+    online = sum(1 for m in guild.members if m.status != discord.Status.offline)
+
+    em = discord.Embed(
+        title=f"{guild.name} Statistiques !",
+        color=embed_color()
+    )
     if guild.icon:
         em.set_thumbnail(url=guild.icon.url)
-    em.add_field(name="👥 Membres total", value=f"`{total_members}`", inline=True)
-    em.add_field(name="🚀 Boosts", value=f"`{total_boosts}`", inline=True)
-    em.add_field(name="\u200b", value="\u200b", inline=True)
-    em.add_field(name="🎙️ En voc", value=f"`{total_in_vc}`", inline=True)
-    em.add_field(name="🔊 Actifs (non mute)", value=f"`{active}`", inline=True)
-    em.add_field(name="🔇 Mute", value=f"`{muted}`", inline=True)
-    em.add_field(name="📺 En stream", value=f"`{streaming}`", inline=True)
-    em.add_field(name="📷 En cam", value=f"`{on_cam}`", inline=True)
+    em.description = (
+        f"*Membres :* **{total_members:,}**\n"
+        f"*En Ligne :* **{online:,}**\n"
+        f"*En Vocal :* **{total_in_vc:,}**\n"
+        f"*En Stream :* **{streaming:,}**\n"
+        f"*Boosts :* **{total_boosts:,}**"
+    )
     em.set_footer(text=f"Voice Master ・ {get_french_time()}")
     await ctx.send(embed=em)
 
