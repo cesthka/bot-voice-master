@@ -16,7 +16,7 @@ if not BOT_TOKEN:
     sys.exit(1)
 
 PARIS_TZ = ZoneInfo("Europe/Paris")
-DEFAULT_BUYER_IDS = [1312375517927706630, 1312375955737542676]
+DEFAULT_BUYER_IDS = [1312375517927706630]
 DEFAULT_PREFIX = "="
 
 logging.basicConfig(
@@ -448,8 +448,8 @@ HELP_CATEGORIES = {
         "label": "Laisse",
         "title": "🐕  Laisse",
         "items": [
-            ("laisse @user",  "Mettre quelqu'un en laisse",  1),
-            ("unleash @user", "Retirer la laisse",           1),
+            ("laisse @user",                   "Mettre quelqu'un en laisse", 1),
+            ("unleash / unlaisse @user",       "Retirer la laisse",          1),
         ],
     },
     "perms": {
@@ -989,7 +989,7 @@ async def _laisse(ctx, member: discord.Member = None):
     await send_log(ctx.guild, "Laisse", ctx.author, member, member.id, color=0xfaa61a)
 
 
-@bot.command(name="unleash")
+@bot.command(name="unleash", aliases=["unlaisse", "delaisse"])
 async def _unleash(ctx, member: discord.Member = None):
     if not has_min_rank(ctx.author.id, 1):
         return await ctx.send(embed=error_embed("❌ Permission refusée", "**Whitelist+** requis."))
