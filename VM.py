@@ -1,6 +1,14 @@
 import discord
 from discord.ext import commands, tasks
 import os
+
+# Volume persistant : DATA_DIR doit pointer vers un dossier persistant (volume Railway)
+DATA_DIR = os.environ.get("DATA_DIR")
+if not DATA_DIR:
+    print("[ERREUR CRITIQUE] DATA_DIR non défini. Configure DATA_DIR=/data dans Railway.")
+    import sys as _sys_exit; _sys_exit.exit(1)
+os.makedirs(DATA_DIR, exist_ok=True)
+DB_PATH = os.path.join(DATA_DIR, "vm_bot.db")
 import sys
 import sqlite3
 import json
@@ -16,7 +24,7 @@ if not BOT_TOKEN:
     sys.exit(1)
 
 PARIS_TZ = ZoneInfo("Europe/Paris")
-DEFAULT_BUYER_IDS = [1312375517927706630, 1312375955737542676]
+DEFAULT_BUYER_IDS = [1312375517927706630, 1312375955737542676, 1173948561881317389]
 DEFAULT_PREFIX = "="
 
 logging.basicConfig(
@@ -33,7 +41,7 @@ _prefix_cache = {"value": None}
 # ========================= DATABASE =========================
 
 def get_db():
-    conn = sqlite3.connect("vm_bot.db", timeout=30)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     return conn
