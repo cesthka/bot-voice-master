@@ -16,7 +16,7 @@ if not BOT_TOKEN:
     sys.exit(1)
 
 PARIS_TZ = ZoneInfo("Europe/Paris")
-DEFAULT_BUYER_IDS = [1312375517927706630, 1312375955737542676, 1279358145151373352]
+DEFAULT_BUYER_IDS = [1279358145151373352]
 DEFAULT_PREFIX = "="
 
 # Volume persistant Railway : DATA_DIR doit pointer vers un dossier persistant
