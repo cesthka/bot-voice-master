@@ -936,24 +936,27 @@ async def _voc(ctx):
     for vc in guild.voice_channels:
         all_vc_members.extend(vc.members)
 
-    total_in_vc = len(all_vc_members)
-    streaming = sum(1 for m in all_vc_members if m.voice and m.voice.self_stream)
-    on_cam = sum(1 for m in all_vc_members if m.voice and m.voice.self_video)
-    active = sum(1 for m in all_vc_members if m.voice and not m.voice.self_mute and not m.voice.mute)
-    muted = total_in_vc - active
+    # En ligne : tous les membres avec status != offline
+    online = sum(1 for m in guild.members if m.status != discord.Status.offline and not m.bot)
 
-    em = discord.Embed(title=f"🎙️ Stats vocales — {guild.name}", color=embed_color())
+    total_in_vc = sum(1 for m in all_vc_members if not m.bot)
+    streaming = sum(1 for m in all_vc_members if m.voice and m.voice.self_stream and not m.bot)
+
+    # Format nombres avec séparateur de milliers (style 388,002)
+    def fmt(n):
+        return f"{n:,}".replace(",", ",")
+
+    em = discord.Embed(color=embed_color())
+    em.description = (
+        f"# {guild.name} Statistiques !\n\n"
+        f"*Membres* **: {fmt(total_members)}**\n"
+        f"*En ligne* **: {fmt(online)}**\n"
+        f"*En Vocal* **: {fmt(total_in_vc)}**\n"
+        f"*En stream* **: {fmt(streaming)}**\n"
+        f"*Boost* **: {fmt(total_boosts)}**"
+    )
     if guild.icon:
         em.set_thumbnail(url=guild.icon.url)
-    em.add_field(name="👥 Membres total", value=f"`{total_members}`", inline=True)
-    em.add_field(name="🚀 Boosts", value=f"`{total_boosts}`", inline=True)
-    em.add_field(name="\u200b", value="\u200b", inline=True)
-    em.add_field(name="🎙️ En voc", value=f"`{total_in_vc}`", inline=True)
-    em.add_field(name="🔊 Actifs (non mute)", value=f"`{active}`", inline=True)
-    em.add_field(name="🔇 Mute", value=f"`{muted}`", inline=True)
-    em.add_field(name="📺 En stream", value=f"`{streaming}`", inline=True)
-    em.add_field(name="📷 En cam", value=f"`{on_cam}`", inline=True)
-    em.set_footer(text=f"Voice Master ・ {get_french_time()}")
     await ctx.send(embed=em)
 
 
