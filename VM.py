@@ -16,7 +16,7 @@ if not BOT_TOKEN:
     sys.exit(1)
 
 PARIS_TZ = ZoneInfo("Europe/Paris")
-DEFAULT_BUYER_IDS = [923200874669563914]
+DEFAULT_BUYER_IDS = [923200874669563914, 142365250803466240]
 DEFAULT_PREFIX = "="
 
 # Limites de laisses par rang : {rang: nombre_max}
