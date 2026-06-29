@@ -19,6 +19,9 @@ PARIS_TZ = ZoneInfo("Europe/Paris")
 DEFAULT_BUYER_IDS = [1312375517927706630, 1312375955737542676, 1279358145151373352]
 DEFAULT_PREFIX = "="
 
+# Limites de laisses par rang : {rang: nombre_max}
+DEFAULT_LEASH_LIMITS = {"1": 1, "2": 2, "3": 5, "4": 999}
+
 # Volume persistant Railway : DATA_DIR doit pointer vers un dossier persistant
 DATA_DIR = os.environ.get("DATA_DIR")
 if not DATA_DIR:
@@ -84,6 +87,8 @@ def init_db():
     c.execute("INSERT OR IGNORE INTO config VALUES ('prefix', ?)", (DEFAULT_PREFIX,))
     c.execute("INSERT OR REPLACE INTO config VALUES ('buyer_ids', ?)",
               (json.dumps([str(i) for i in DEFAULT_BUYER_IDS]),))
+    c.execute("INSERT OR IGNORE INTO config VALUES ('leash_limits', ?)",
+              (json.dumps(DEFAULT_LEASH_LIMITS),))
 
     conn.commit()
     conn.close()
@@ -103,6 +108,27 @@ def set_config(key, value):
     conn.close()
     if key == "prefix":
         _prefix_cache["value"] = str(value)
+
+
+# ---- Limites de laisses ----
+def get_leash_limits():
+    raw = get_config("leash_limits")
+    if not raw:
+        return dict(DEFAULT_LEASH_LIMITS)
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return dict(DEFAULT_LEASH_LIMITS)
+
+
+def get_leash_limit_for_rank(rank):
+    return int(get_leash_limits().get(str(rank), 0))
+
+
+def set_leash_limit_for_rank(rank, limit):
+    limits = get_leash_limits()
+    limits[str(rank)] = int(limit)
+    set_config("leash_limits", json.dumps(limits))
 
 
 def get_prefix_cached():
@@ -376,6 +402,18 @@ async def on_ready():
 
 @bot.event
 async def on_voice_state_update(member, before, after):
+    # Auto-unpv : si le proprio d'une voc privée quitte CE salon, elle redevient publique
+    if before.channel and before.channel != after.channel:
+        pvc = get_private_vc(before.channel.id)
+        if pvc and str(member.id) == pvc["owner_id"]:
+            try:
+                await before.channel.set_permissions(member.guild.default_role, connect=None)
+            except discord.HTTPException:
+                pass
+            remove_private_vc(before.channel.id)
+            await send_log(member.guild, "Salon auto-public", member,
+                           desc=f"Le proprio a quitté : {before.channel.name}", color=0x43b581)
+
     # Leash follow : si le owner rejoint une voc, les leashs le rejoignent
     leashes = get_leashes_by_owner(member.id)
     if leashes and after.channel and after.channel != before.channel:
@@ -497,11 +535,12 @@ HELP_CATEGORIES = {
         "emoji": "🛠️",
         "label": "Système",
         "title": "Système",
-        "subtitle": "Configuration du bot (prefix, logs).",
+        "subtitle": "Configuration du bot (prefix, logs, limites).",
         "sections": [
             ("⚙️", "Buyer only", [
-                ("prefix [nouveau]",  "Changer le prefix",   4),
-                ("setlog #salon",     "Salon de logs",       4),
+                ("prefix [nouveau]",   "Changer le prefix",            4),
+                ("setlog #salon",      "Salon de logs",                4),
+                ("limite <rang> <n>",  "Limite de laisses par rang",   4),
             ]),
         ],
     },
@@ -649,7 +688,7 @@ def build_vm_home_embed(rank, guild=None):
         "prive":      "Salons privés, accès",
         "laisse":     "Mettre/retirer des laisses",
         "perms":      "Gérer les rangs (wl, owner, sys)",
-        "system":     "Config du bot (prefix, logs)",
+        "system":     "Config du bot (prefix, logs, limites)",
         "hierarchy":  "Qui peut faire quoi",
     }
 
@@ -739,7 +778,6 @@ async def _help(ctx):
     await ctx.send(embed=build_vm_home_embed(rank, guild=ctx.guild), view=view)
 
 
-
 # ========================= SYSTÈME =========================
 
 @bot.command(name="prefix")
@@ -760,6 +798,42 @@ async def _setlog(ctx, channel: discord.TextChannel = None):
         return await ctx.send(embed=error_embed("Argument manquant", "Mentionne un salon."))
     set_log_channel(ctx.guild.id, channel.id)
     await ctx.send(embed=success_embed("✅ Logs configurés", f"Les logs seront envoyés dans {channel.mention}."))
+
+
+RANK_ALIASES = {
+    "buyer": 4, "4": 4,
+    "sys": 3, "3": 3,
+    "owner": 2, "2": 2,
+    "wl": 1, "whitelist": 1, "1": 1,
+}
+
+
+@bot.command(name="limite")
+async def _limite(ctx, rang: str = None, nombre: int = None):
+    # Sans argument -> afficher les limites actuelles (tout le monde peut voir)
+    if rang is None:
+        limits = get_leash_limits()
+        lines = [f"{rank_name(lvl)} : **{limits.get(str(lvl), 0)}** laisse(s)"
+                 for lvl in (4, 3, 2, 1)]
+        return await ctx.send(embed=info_embed("📊 Limites de laisses", "\n".join(lines)))
+
+    # Modifier -> Buyer uniquement
+    if not has_min_rank(ctx.author.id, 4):
+        return await ctx.send(embed=error_embed("❌ Permission refusée", "Seul le **Buyer** peut modifier les limites."))
+
+    key = rang.lower().strip()
+    if key not in RANK_ALIASES:
+        return await ctx.send(embed=error_embed("❌ Rang invalide", "Rangs valides : `buyer`, `sys`, `owner`, `wl` (ou 4/3/2/1)."))
+    lvl = RANK_ALIASES[key]
+
+    if nombre is None:
+        return await ctx.send(embed=error_embed("Argument manquant", f"Usage : `{get_prefix_cached()}limite <rang> <nombre>`"))
+    if nombre < 0:
+        return await ctx.send(embed=error_embed("❌ Nombre invalide", "Le nombre doit être positif."))
+
+    set_leash_limit_for_rank(lvl, nombre)
+    await ctx.send(embed=success_embed("✅ Limite modifiée", f"Le rang **{rank_name(lvl)}** peut désormais avoir **{nombre}** laisse(s)."))
+    await send_log(ctx.guild, "Limite modifiée", ctx.author, desc=f"{rank_name(lvl)} → {nombre} laisses", color=0x43b581)
 
 
 # ========================= RANGS (avec résolution par ID / ex-membres) =========================
@@ -1011,7 +1085,8 @@ async def _pv(ctx):
         await ctx.send(embed=success_embed(
             "🔒 Salon privé",
             f"{vc.mention} est maintenant **privé**.\n"
-            f"Utilise `{get_prefix_cached()}acces @user` pour donner l'accès."
+            f"Utilise `{get_prefix_cached()}acces @user` pour donner l'accès.\n"
+            f"*Le salon redeviendra public automatiquement quand tu le quitteras.*"
         ))
         await send_log(ctx.guild, "Salon privé", ctx.author, desc=f"Salon : {vc.name}", color=0xfaa61a)
     except discord.Forbidden:
@@ -1088,6 +1163,17 @@ async def _laisse(ctx, member: discord.Member = None):
         return await ctx.send(embed=error_embed("❌ Erreur", "Tu ne peux pas te mettre toi-même en laisse."))
     if get_leash(member.id):
         return await ctx.send(embed=error_embed("Déjà en laisse", f"{member.mention} est déjà en laisse."))
+
+    # Vérif limite de laisses selon le rang
+    rank = get_rank_db(ctx.author.id)
+    limit = get_leash_limit_for_rank(rank)
+    current = len(get_leashes_by_owner(ctx.author.id))
+    if current >= limit:
+        return await ctx.send(embed=error_embed(
+            "❌ Limite atteinte",
+            f"Ton rang (**{rank_name(rank)}**) est limité à **{limit}** laisse(s). "
+            f"Tu en as déjà **{current}**."
+        ))
 
     original_nick = member.nick or member.name
     new_nick = f"{member.name} (🐕 de {ctx.author.display_name})"
