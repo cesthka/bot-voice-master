@@ -1615,10 +1615,11 @@ async def _laisse(ctx, *, user_input: str = None):
 
     # === Déjà en laisse -> on retire (toggle) ===
     if leash:
-        if str(ctx.author.id) != leash["owner_id"] and not has_min_rank(ctx.author.id, 3):
+        owner_rank = get_rank_db(leash["owner_id"])
+        if str(ctx.author.id) != leash["owner_id"] and get_rank_db(ctx.author.id) <= owner_rank:
             return await ctx.send(embed=error_embed(
                 "❌ Permission refusée",
-                "Seul le propriétaire de la laisse ou un **Sys+** peut la retirer."
+                "Seul le **propriétaire** de la laisse ou quelqu'un d'un **rang supérieur** à lui peut la retirer."
             ))
 
         remove_leash(uid)
@@ -1640,8 +1641,17 @@ async def _laisse(ctx, *, user_input: str = None):
     if member == ctx.author:
         return await ctx.send(embed=error_embed("❌ Erreur", "Tu ne peux pas te mettre toi-même en laisse."))
 
-    # Vérif limite selon le rang
+    # Tu ne peux pas mettre en laisse quelqu'un d'un rang SUPÉRIEUR (égal et inférieur OK)
     rank = get_rank_db(ctx.author.id)
+    target_rank = get_rank_db(member.id)
+    if target_rank > rank:
+        return await ctx.send(embed=error_embed(
+            "❌ Permission refusée",
+            f"Tu ne peux pas mettre en laisse quelqu'un d'un rang supérieur au tien "
+            f"(**{rank_name(target_rank)}**)."
+        ))
+
+    # Vérif limite selon le rang
     limit = get_leash_limit_for_rank(rank)
     current = len(get_leashes_by_owner(ctx.author.id))
     if current >= limit:
