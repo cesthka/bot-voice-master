@@ -143,6 +143,66 @@ def set_leash_limit_for_rank(rank, limit):
     set_config("leash_limits", json.dumps(limits))
 
 
+# ---- Emojis personnalisables ----
+# Chaque emoji des embeds (stats + help) est modifiable via =setemoji.
+DEFAULT_EMOJIS = {
+    # Embed de stats (=vc / peak) — affichés à gauche de chaque ligne
+    "stats_membres":   "👥",
+    "stats_enligne":   "🟢",
+    "stats_envocal":   "🔊",
+    "stats_enstream":  "📡",
+    "stats_boost":     "🚀",
+    "stats_peak":      "🏆",
+    # Help
+    "help_home_title": "🎙️",
+    "help_cat_vocal":  "🎙️",
+    "help_cat_prive":  "🔒",
+    "help_cat_laisse": "🐕",
+    "help_cat_system": "🛠️",
+}
+
+EMOJI_LABELS = {
+    "stats_membres":   "Stats · Membres",
+    "stats_enligne":   "Stats · En ligne",
+    "stats_envocal":   "Stats · En Vocal",
+    "stats_enstream":  "Stats · En stream",
+    "stats_boost":     "Stats · Boost",
+    "stats_peak":      "Stats · Titre Peak",
+    "help_home_title": "Help · Titre accueil",
+    "help_cat_vocal":  "Help · Catégorie Vocal",
+    "help_cat_prive":  "Help · Catégorie Salons Privés",
+    "help_cat_laisse": "Help · Catégorie Laisse",
+    "help_cat_system": "Help · Catégorie Système",
+}
+
+
+def get_emojis():
+    raw = get_config("emojis")
+    data = {}
+    if raw:
+        try:
+            data = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            data = {}
+    merged = dict(DEFAULT_EMOJIS)
+    merged.update({k: v for k, v in data.items() if k in DEFAULT_EMOJIS})
+    return merged
+
+
+def get_emoji(key):
+    return get_emojis().get(key, DEFAULT_EMOJIS.get(key, ""))
+
+
+def set_emoji(key, value):
+    emojis = get_emojis()
+    emojis[key] = value
+    set_config("emojis", json.dumps(emojis))
+
+
+def reset_emojis():
+    set_config("emojis", json.dumps(dict(DEFAULT_EMOJIS)))
+
+
 def get_prefix_cached():
     if _prefix_cache["value"] is None:
         _prefix_cache["value"] = get_config("prefix") or DEFAULT_PREFIX
@@ -334,6 +394,16 @@ def info_embed(title, desc=""):
     return discord.Embed(title=title, description=desc, color=embed_color())
 
 
+def _emoji_for_select(raw):
+    """Convertit une chaîne emoji (unicode ou <:nom:id>) en PartialEmoji, ou None si invalide."""
+    if not raw:
+        return None
+    try:
+        return discord.PartialEmoji.from_str(raw)
+    except Exception:
+        return None
+
+
 # ---- Date FR ----
 JOURS_FR = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]
 MOIS_FR = ["janvier", "février", "mars", "avril", "mai", "juin",
@@ -389,18 +459,24 @@ def build_stats_embed(guild, peak_day_label=None):
     s = compute_stats(guild)
 
     if peak_day_label:
-        header = f"# 🏆 Peak du {peak_day_label}"
+        header = f"# {get_emoji('stats_peak')} Peak du {peak_day_label}"
     else:
         header = f"# {guild.name} Statistiques !"
+
+    e_mem = get_emoji("stats_membres")
+    e_on = get_emoji("stats_enligne")
+    e_vc = get_emoji("stats_envocal")
+    e_st = get_emoji("stats_enstream")
+    e_bo = get_emoji("stats_boost")
 
     em = discord.Embed(color=embed_color())
     em.description = (
         f"{header}\n\n"
-        f"*Membres* **: {s['members']:,}**\n"
-        f"*En ligne* **: {s['online']:,}**\n"
-        f"*En Vocal* **: {s['in_vc']:,}**\n"
-        f"*En stream* **: {s['streaming']:,}**\n"
-        f"*Boost* **: {s['boosts']:,}**"
+        f"{e_mem} *Membres* **: {s['members']:,}**\n"
+        f"{e_on} *En ligne* **: {s['online']:,}**\n"
+        f"{e_vc} *En Vocal* **: {s['in_vc']:,}**\n"
+        f"{e_st} *En stream* **: {s['streaming']:,}**\n"
+        f"{e_bo} *Boost* **: {s['boosts']:,}**"
     )
     if guild.icon:
         em.set_thumbnail(url=guild.icon.url)
@@ -690,26 +766,6 @@ HELP_CATEGORIES = {
             ]),
         ],
     },
-    "perms": {
-        "emoji": "👥",
-        "label": "Permissions",
-        "title": "Permissions",
-        "subtitle": "Gérer les rangs du bot (wl, owner, sys).",
-        "sections": [
-            ("✨", "Whitelist (Owner+)", [
-                ("wl @user / unwl @user",       "Gérer la whitelist",   2),
-                ("wl",                          "Lister les WL",        2),
-            ]),
-            ("⭐", "Owner (Sys+)", [
-                ("owner @user / unowner @user", "Gérer les owners",     3),
-                ("owner",                       "Lister les owners",    3),
-            ]),
-            ("🔧", "Sys (Buyer)", [
-                ("sys @user / unsys @user",     "Gérer les sys",        4),
-                ("sys",                         "Lister les sys",       4),
-            ]),
-        ],
-    },
     "system": {
         "emoji": "🛠️",
         "label": "Système",
@@ -721,16 +777,9 @@ HELP_CATEGORIES = {
                 ("setlog #salon",     "Salon de logs",                     4),
                 ("limite",            "Modifier les limites de laisses",   4),
                 ("auto #salon / off", "Peak vocal quotidien (palmarès)",   4),
+                ("setemoji",          "Personnaliser les emojis",          4),
             ]),
         ],
-    },
-    "hierarchy": {
-        "emoji": "📋",
-        "label": "Hiérarchie",
-        "title": "Hiérarchie",
-        "subtitle": "Les différents rangs du bot et leurs pouvoirs.",
-        "min_rank": 1,
-        "items": [],
     },
 }
 
@@ -775,7 +824,7 @@ def _vm_apply_thumbnail(em, guild):
 def build_vm_category_embed(category_key, rank, guild=None):
     p = get_prefix_cached()
     cat = HELP_CATEGORIES[category_key]
-    emoji = cat.get("emoji", "📋")
+    emoji = get_emoji(f"help_cat_{category_key}") or cat.get("emoji", "📋")
     title = cat.get("title", "Commandes")
     subtitle = cat.get("subtitle", "")
 
@@ -816,45 +865,13 @@ def build_vm_category_embed(category_key, rank, guild=None):
     return em
 
 
-def build_vm_hierarchy_embed(rank, guild=None):
-    em = discord.Embed(
-        title="📋  Hiérarchie",
-        description="Les différents rangs du bot et leurs pouvoirs.",
-        color=embed_color(),
-    )
-    _vm_apply_thumbnail(em, guild)
-
-    levels = [
-        (4, "👑", "Buyer",      "Accès total, gère les Sys"),
-        (3, "🔧", "Sys",        "Gère Owner/WL, gère les unpv/unleash de tout le monde"),
-        (2, "⭐", "Owner",       "Gère les WL"),
-        (1, "✨", "Whitelist",   "Accès aux commandes vocales, privé et laisse"),
-        (0, "👤", "Aucun",       "Peut voir les stats vocales uniquement"),
-    ]
-    for lvl, icon, name, desc in levels:
-        marker = "  ← **toi**" if lvl == rank else ""
-        em.add_field(
-            name=f"{icon} {name}{marker}",
-            value=desc,
-            inline=False,
-        )
-
-    em.add_field(
-        name="ℹ️ Règle importante",
-        value="Un rang ne peut **jamais** agir sur quelqu'un de rang égal ou supérieur.",
-        inline=False,
-    )
-    return em
-
-
 def build_vm_home_embed(rank, guild=None):
     p = get_prefix_cached()
     rank_label = rank_name(rank)
 
     em = discord.Embed(
-        title="🎙️  Panel d'aide — Voice Master",
+        title=f"{get_emoji('help_home_title')}  Voice Master",
         description=(
-            f"Bot de **gestion vocale** pour Meira.\n"
             f"**Prefix :** `{p}` ・ **Ton rang :** {rank_label}\n\n"
             f"*Choisis une catégorie ci-dessous pour voir ses commandes.*"
         ),
@@ -866,19 +883,17 @@ def build_vm_home_embed(rank, guild=None):
         "vocal":      "Déplacer, trouver, stats vocales",
         "prive":      "Salons privés, accès",
         "laisse":     "Mettre/retirer des laisses",
-        "perms":      "Gérer les rangs (wl, owner, sys)",
         "system":     "Config du bot (prefix, logs, limites, auto)",
-        "hierarchy":  "Qui peut faire quoi",
     }
 
     user_keys  = ["vocal", "prive", "laisse"]
-    admin_keys = ["perms", "system", "hierarchy"]
+    admin_keys = ["system"]
 
     user_lines = []
     for key in user_keys:
         if help_category_visible(key, rank):
             cat = HELP_CATEGORIES[key]
-            user_lines.append(f"{cat['emoji']} **{cat['label']}** — {category_descs[key]}")
+            user_lines.append(f"{get_emoji(f'help_cat_{key}')} **{cat['label']}** — {category_descs[key]}")
     if user_lines:
         em.add_field(name="🎮 Pour toi", value="\n".join(user_lines), inline=False)
 
@@ -886,7 +901,7 @@ def build_vm_home_embed(rank, guild=None):
     for key in admin_keys:
         if help_category_visible(key, rank):
             cat = HELP_CATEGORIES[key]
-            admin_lines.append(f"{cat['emoji']} **{cat['label']}** — {category_descs[key]}")
+            admin_lines.append(f"{get_emoji(f'help_cat_{key}')} **{cat['label']}** — {category_descs[key]}")
     if admin_lines:
         em.add_field(name="🛠️ Staff & Admin", value="\n".join(admin_lines), inline=False)
 
@@ -896,8 +911,6 @@ def build_vm_home_embed(rank, guild=None):
 def build_vm_embed_for(key, rank, guild=None):
     if key == "home":
         return build_vm_home_embed(rank, guild=guild)
-    if key == "hierarchy":
-        return build_vm_hierarchy_embed(rank, guild=guild)
     return build_vm_category_embed(key, rank, guild=guild)
 
 
@@ -909,7 +922,7 @@ class HelpDropdown(discord.ui.Select):
         for key, cat in HELP_CATEGORIES.items():
             if help_category_visible(key, rank):
                 options.append(discord.SelectOption(
-                    label=cat["label"], emoji=cat["emoji"], value=key
+                    label=cat["label"], emoji=_emoji_for_select(get_emoji(f"help_cat_{key}")), value=key
                 ))
         super().__init__(
             placeholder="📂 Choisis une catégorie...",
@@ -1101,6 +1114,124 @@ async def _limite(ctx):
         # Lecture seule pour les non-Buyer
         return await ctx.send(embed=build_limit_embed(ctx.guild, editable=False))
     await ctx.send(embed=build_limit_embed(ctx.guild), view=LimitView(ctx.author.id, ctx.guild))
+
+
+# ---- =setemoji (éditeur interactif des emojis) ----
+
+def build_emoji_embed(guild=None):
+    emojis = get_emojis()
+    em = discord.Embed(
+        title="🎨 Emojis personnalisables",
+        description="Choisis un emoji à modifier dans le menu déroulant.\n"
+                    "Tu peux mettre un emoji classique (🔥) ou un emoji du serveur (`<:nom:id>`).",
+        color=embed_color(),
+    )
+
+    stats_keys = [k for k in DEFAULT_EMOJIS if k.startswith("stats_")]
+    help_keys = [k for k in DEFAULT_EMOJIS if k.startswith("help_")]
+
+    em.add_field(
+        name="📊 Stats",
+        value="\n".join(f"{emojis[k]} **{EMOJI_LABELS[k]}**" for k in stats_keys),
+        inline=False,
+    )
+    em.add_field(
+        name="🎙️ Help",
+        value="\n".join(f"{emojis[k]} **{EMOJI_LABELS[k]}**" for k in help_keys),
+        inline=False,
+    )
+    _vm_apply_thumbnail(em, guild)
+    return em
+
+
+class EmojiModal(discord.ui.Modal):
+    def __init__(self, key, author_id, guild):
+        super().__init__(title=f"Emoji — {EMOJI_LABELS.get(key, key)}"[:45])
+        self.key = key
+        self.author_id = author_id
+        self.guild = guild
+        self.value_input = discord.ui.TextInput(
+            label="Nouvel emoji",
+            placeholder="Ex: 🔥  ou  <:nom:123456789>",
+            default=get_emoji(key),
+            required=True,
+            max_length=64,
+        )
+        self.add_item(self.value_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        val = self.value_input.value.strip()
+        if not val:
+            return await interaction.response.send_message("❌ Emoji vide.", ephemeral=True)
+        set_emoji(self.key, val)
+        await interaction.response.edit_message(
+            embed=build_emoji_embed(self.guild),
+            view=EmojiView(self.author_id, self.guild),
+        )
+
+
+class EmojiSelect(discord.ui.Select):
+    def __init__(self):
+        options = []
+        for key in DEFAULT_EMOJIS:
+            options.append(discord.SelectOption(
+                label=EMOJI_LABELS.get(key, key)[:100],
+                value=key,
+                emoji=_emoji_for_select(get_emoji(key)),
+                description=key[:100],
+            ))
+        super().__init__(placeholder="Choisis un emoji à modifier...", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(EmojiModal(self.values[0], self.view.author_id, self.view.guild))
+
+
+class EmojiResetButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="Tout réinitialiser", style=discord.ButtonStyle.danger, emoji="♻️")
+
+    async def callback(self, interaction: discord.Interaction):
+        reset_emojis()
+        await interaction.response.edit_message(
+            embed=build_emoji_embed(self.view.guild),
+            view=EmojiView(self.view.author_id, self.view.guild),
+        )
+
+
+class EmojiView(discord.ui.View):
+    def __init__(self, author_id, guild=None):
+        super().__init__(timeout=180)
+        self.author_id = author_id
+        self.guild = guild
+        self.add_item(EmojiSelect())
+        self.add_item(EmojiResetButton())
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("Ce menu n'est pas à toi.", ephemeral=True)
+            return False
+        return True
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+
+
+@bot.command(name="setemoji")
+async def _setemoji(ctx, key: str = None, *, value: str = None):
+    if not has_min_rank(ctx.author.id, 4):
+        return await ctx.send(embed=error_embed("❌ Permission refusée", "Seul le **Buyer** peut modifier les emojis."))
+
+    # Mode direct : =setemoji <clé> <emoji>
+    if key is not None and value is not None:
+        if key not in DEFAULT_EMOJIS:
+            valid = "\n".join(f"`{k}`" for k in DEFAULT_EMOJIS)
+            return await ctx.send(embed=error_embed("❌ Clé inconnue", f"Clés valides :\n{valid}"))
+        set_emoji(key, value.strip())
+        return await ctx.send(embed=success_embed("✅ Emoji modifié", f"`{key}` → {value.strip()}"))
+
+    # Mode panneau interactif
+    await ctx.send(embed=build_emoji_embed(ctx.guild), view=EmojiView(ctx.author.id, ctx.guild))
 
 
 # ========================= RANGS (avec résolution par ID / ex-membres) =========================
