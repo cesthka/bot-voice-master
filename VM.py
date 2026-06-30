@@ -966,6 +966,8 @@ class HelpView(discord.ui.View):
 @bot.command(name="help")
 async def _help(ctx):
     rank = get_rank_db(ctx.author.id)
+    if rank < 1:
+        return  # Aucun rang -> la commande ne fait rien
     view = HelpView(ctx.author.id, rank, guild=ctx.guild)
     await ctx.send(embed=build_vm_home_embed(rank, guild=ctx.guild), view=view)
 
