@@ -2,6 +2,7 @@ import discord
 from discord.ext import commands, tasks
 import os
 import sys
+import asyncio
 import sqlite3
 import json
 import logging
@@ -1144,32 +1145,6 @@ def build_emoji_embed(guild=None):
     return em
 
 
-class EmojiModal(discord.ui.Modal):
-    def __init__(self, key, author_id, guild):
-        super().__init__(title=f"Emoji — {EMOJI_LABELS.get(key, key)}"[:45])
-        self.key = key
-        self.author_id = author_id
-        self.guild = guild
-        self.value_input = discord.ui.TextInput(
-            label="Nouvel emoji",
-            placeholder="Ex: 🔥  ou  <:nom:123456789>",
-            default=get_emoji(key),
-            required=True,
-            max_length=64,
-        )
-        self.add_item(self.value_input)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        val = self.value_input.value.strip()
-        if not val:
-            return await interaction.response.send_message("❌ Emoji vide.", ephemeral=True)
-        set_emoji(self.key, val)
-        await interaction.response.edit_message(
-            embed=build_emoji_embed(self.guild),
-            view=EmojiView(self.author_id, self.guild),
-        )
-
-
 class EmojiSelect(discord.ui.Select):
     def __init__(self):
         options = []
@@ -1183,7 +1158,48 @@ class EmojiSelect(discord.ui.Select):
         super().__init__(placeholder="Choisis un emoji à modifier...", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
-        await interaction.response.send_modal(EmojiModal(self.values[0], self.view.author_id, self.view.guild))
+        key = self.values[0]
+        label = EMOJI_LABELS.get(key, key)
+        panel_msg = interaction.message
+        author_id = self.view.author_id
+        guild = self.view.guild
+
+        # Le bot demande l'emoji dans le salon
+        await interaction.response.send_message(
+            f"📨 Envoie l'emoji pour **{label}** dans ce salon. *(60 secondes)*"
+        )
+
+        def check(m):
+            return m.author.id == author_id and m.channel.id == interaction.channel.id
+
+        try:
+            reply = await bot.wait_for("message", check=check, timeout=60)
+        except asyncio.TimeoutError:
+            try:
+                await interaction.edit_original_response(content="⏱️ Temps écoulé, aucun emoji reçu.")
+            except discord.HTTPException:
+                pass
+            return
+
+        val = reply.content.strip()
+        if val:
+            set_emoji(key, val)
+
+        # Supprime la demande du bot puis l'emoji envoyé par l'utilisateur
+        try:
+            await interaction.delete_original_response()
+        except discord.HTTPException:
+            pass
+        try:
+            await reply.delete()
+        except discord.HTTPException:
+            pass
+
+        # Met à jour le panneau
+        try:
+            await panel_msg.edit(embed=build_emoji_embed(guild), view=EmojiView(author_id, guild))
+        except discord.HTTPException:
+            pass
 
 
 class EmojiResetButton(discord.ui.Button):
