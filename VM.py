@@ -84,6 +84,18 @@ def init_db():
         guild_id TEXT PRIMARY KEY, channel_id TEXT NOT NULL
     )""")
 
+    # Système =auto (peak vocal quotidien / palmarès)
+    c.execute("""CREATE TABLE IF NOT EXISTS auto_channels (
+        guild_id TEXT PRIMARY KEY, channel_id TEXT NOT NULL
+    )""")
+
+    c.execute("""CREATE TABLE IF NOT EXISTS auto_peaks (
+        guild_id TEXT PRIMARY KEY,
+        day TEXT NOT NULL,
+        peak INTEGER NOT NULL,
+        message_id TEXT
+    )""")
+
     c.execute("INSERT OR IGNORE INTO config VALUES ('prefix', ?)", (DEFAULT_PREFIX,))
     c.execute("INSERT OR REPLACE INTO config VALUES ('buyer_ids', ?)",
               (json.dumps([str(i) for i in DEFAULT_BUYER_IDS]),))
@@ -256,6 +268,46 @@ def get_vc_access(channel_id):
     return [r["user_id"] for r in rows]
 
 
+# ---- Auto peak ----
+def set_auto_channel(guild_id, channel_id):
+    conn = get_db()
+    conn.execute("INSERT OR REPLACE INTO auto_channels VALUES (?, ?)", (str(guild_id), str(channel_id)))
+    # On repart à zéro sur le suivi du peak quand on (re)définit le salon
+    conn.execute("DELETE FROM auto_peaks WHERE guild_id = ?", (str(guild_id),))
+    conn.commit()
+    conn.close()
+
+
+def get_auto_channel(guild_id):
+    conn = get_db()
+    row = conn.execute("SELECT channel_id FROM auto_channels WHERE guild_id = ?", (str(guild_id),)).fetchone()
+    conn.close()
+    return row["channel_id"] if row else None
+
+
+def remove_auto_channel(guild_id):
+    conn = get_db()
+    conn.execute("DELETE FROM auto_channels WHERE guild_id = ?", (str(guild_id),))
+    conn.execute("DELETE FROM auto_peaks WHERE guild_id = ?", (str(guild_id),))
+    conn.commit()
+    conn.close()
+
+
+def get_auto_peak(guild_id):
+    conn = get_db()
+    row = conn.execute("SELECT * FROM auto_peaks WHERE guild_id = ?", (str(guild_id),)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def set_auto_peak(guild_id, day, peak, message_id):
+    conn = get_db()
+    conn.execute("INSERT OR REPLACE INTO auto_peaks VALUES (?, ?, ?, ?)",
+                 (str(guild_id), day, int(peak), str(message_id) if message_id else None))
+    conn.commit()
+    conn.close()
+
+
 # ========================= HELPERS =========================
 
 def rank_name(level):
@@ -271,29 +323,35 @@ def embed_color():
 
 
 def success_embed(title, desc=""):
-    em = discord.Embed(title=title, description=desc, color=0x43b581)
-    em.set_footer(text="Voice Master")
-    return em
+    return discord.Embed(title=title, description=desc, color=0x43b581)
 
 
 def error_embed(title, desc=""):
-    em = discord.Embed(title=title, description=desc, color=0xf04747)
-    em.set_footer(text="Voice Master")
-    return em
+    return discord.Embed(title=title, description=desc, color=0xf04747)
 
 
 def info_embed(title, desc=""):
-    em = discord.Embed(title=title, description=desc, color=embed_color())
-    em.set_footer(text="Voice Master")
-    return em
+    return discord.Embed(title=title, description=desc, color=embed_color())
 
 
-def get_french_time():
-    now = datetime.now(PARIS_TZ)
-    JOURS_FR = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]
-    MOIS_FR = ["janvier", "février", "mars", "avril", "mai", "juin",
-               "juillet", "août", "septembre", "octobre", "novembre", "décembre"]
-    return f"{JOURS_FR[now.weekday()]} {now.day} {MOIS_FR[now.month - 1]} {now.year} — {now.strftime('%Hh%M')}"
+# ---- Date FR ----
+JOURS_FR = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]
+MOIS_FR = ["janvier", "février", "mars", "avril", "mai", "juin",
+           "juillet", "août", "septembre", "octobre", "novembre", "décembre"]
+
+
+def french_now():
+    return datetime.now(PARIS_TZ)
+
+
+def french_day_key(now=None):
+    now = now or french_now()
+    return now.strftime("%Y-%m-%d")
+
+
+def french_day_label(now=None):
+    now = now or french_now()
+    return f"{JOURS_FR[now.weekday()]} {now.day} {MOIS_FR[now.month - 1]} {now.year}"
 
 
 def is_public_vc(channel):
@@ -305,12 +363,55 @@ def is_public_vc(channel):
     return perms.connect and not channel.user_limit == 1
 
 
+# ---- Stats vocales ----
+def compute_stats(guild):
+    total_members = guild.member_count
+    total_boosts = guild.premium_subscription_count
+
+    all_vc_members = []
+    for vc in guild.voice_channels:
+        all_vc_members.extend(vc.members)
+
+    online = sum(1 for m in guild.members if m.status != discord.Status.offline and not m.bot)
+    total_in_vc = sum(1 for m in all_vc_members if not m.bot)
+    streaming = sum(1 for m in all_vc_members if m.voice and m.voice.self_stream and not m.bot)
+
+    return {
+        "members": total_members,
+        "online": online,
+        "in_vc": total_in_vc,
+        "streaming": streaming,
+        "boosts": total_boosts,
+    }
+
+
+def build_stats_embed(guild, peak_day_label=None):
+    s = compute_stats(guild)
+
+    if peak_day_label:
+        header = f"# 🏆 Peak du {peak_day_label}"
+    else:
+        header = f"# {guild.name} Statistiques !"
+
+    em = discord.Embed(color=embed_color())
+    em.description = (
+        f"{header}\n\n"
+        f"*Membres* **: {s['members']:,}**\n"
+        f"*En ligne* **: {s['online']:,}**\n"
+        f"*En Vocal* **: {s['in_vc']:,}**\n"
+        f"*En stream* **: {s['streaming']:,}**\n"
+        f"*Boost* **: {s['boosts']:,}**"
+    )
+    if guild.icon:
+        em.set_thumbnail(url=guild.icon.url)
+    return em
+
+
 # ========================= RESOLVE USER (ex-membres OK) =========================
 
 async def resolve_user_or_id(ctx, user_input):
     """
     Retourne (display_obj, user_id) — marche même si la personne n'est plus sur le serveur.
-    Utilisé pour les commandes de rang (sys/owner/wl) qui agissent juste sur la DB.
     """
     if not user_input:
         return None, None
@@ -354,6 +455,31 @@ def format_user_display(display_obj, user_id):
     return f"<@{user_id}> (`{user_id}`) *(hors serveur)*"
 
 
+async def resolve_member(ctx, user_input):
+    """
+    Résout un MEMBRE présent sur le serveur via mention, <@id>, ID brut ou nom.
+    Retourne le Member, ou None s'il n'est pas (ou plus) sur le serveur.
+    Utilisé pour les commandes qui agissent réellement en vocal (mv, join, find...).
+    """
+    if not user_input or not ctx.guild:
+        return None
+    raw = user_input.strip()
+    cleaned = raw.strip("<@!>")
+
+    # 1) ID brut ou mention <@id>
+    try:
+        uid = int(cleaned)
+        return ctx.guild.get_member(uid)  # None si pas sur le serveur
+    except ValueError:
+        pass
+
+    # 2) Nom / pseudo via le converter classique
+    try:
+        return await commands.MemberConverter().convert(ctx, raw)
+    except commands.CommandError:
+        return None
+
+
 # ========================= BOT SETUP =========================
 
 init_db()
@@ -382,7 +508,6 @@ async def send_log(guild, action, author, target_display=None, target_id=None, d
         em.add_field(name="Cible", value=format_user_display(target_display, target_id), inline=True)
     if desc:
         em.add_field(name="Détail", value=desc, inline=False)
-    em.set_footer(text=get_french_time())
     try:
         await channel.send(embed=em)
     except discord.HTTPException as e:
@@ -395,9 +520,10 @@ async def send_log(guild, action, author, target_display=None, target_id=None, d
 async def on_ready():
     log.info(f"Bot connecté : {bot.user} ({bot.user.id})")
     log.info(f"Prefix : {get_prefix_cached()}")
-    await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name="les vocales"))
     if not leash_follow.is_running():
         leash_follow.start()
+    if not auto_peak_loop.is_running():
+        auto_peak_loop.start()
 
 
 @bot.event
@@ -462,7 +588,59 @@ async def leash_follow():
                             pass
 
 
-# ========================= HELP SYSTEM (filtré par rang, nouveau style) =========================
+@tasks.loop(seconds=30)
+async def auto_peak_loop():
+    """
+    Palmarès quotidien : poste l'embed de stats au pic de vocaux du jour.
+    - Dès qu'un nouveau record du jour est atteint -> supprime l'ancien message du jour, en reposte un.
+    - À minuit (heure FR) on change de jour : l'ancien message reste (archive), on repart à zéro.
+    """
+    today = french_day_key()
+    for guild in bot.guilds:
+        ch_id = get_auto_channel(guild.id)
+        if not ch_id:
+            continue
+        channel = guild.get_channel(int(ch_id))
+        if channel is None:
+            continue
+
+        stats = compute_stats(guild)
+        count = stats["in_vc"]
+        peak = get_auto_peak(guild.id)
+
+        # Nouveau jour (ou première fois) : on garde l'ancien message, on repart à zéro
+        if peak is None or peak["day"] != today:
+            if count > 0:
+                try:
+                    msg = await channel.send(embed=build_stats_embed(guild, peak_day_label=french_day_label()))
+                    set_auto_peak(guild.id, today, count, msg.id)
+                except discord.HTTPException:
+                    pass
+            else:
+                set_auto_peak(guild.id, today, 0, None)
+            continue
+
+        # Même jour : on ne reposte QUE si on bat le record du jour
+        if count > peak["peak"]:
+            if peak["message_id"]:
+                try:
+                    old = await channel.fetch_message(int(peak["message_id"]))
+                    await old.delete()
+                except discord.HTTPException:
+                    pass
+            try:
+                msg = await channel.send(embed=build_stats_embed(guild, peak_day_label=french_day_label()))
+                set_auto_peak(guild.id, today, count, msg.id)
+            except discord.HTTPException:
+                pass
+
+
+@auto_peak_loop.before_loop
+async def before_auto_peak():
+    await bot.wait_until_ready()
+
+
+# ========================= HELP SYSTEM (filtré par rang) =========================
 
 # Rangs : 0 = Aucun, 1 = WL, 2 = Owner, 3 = Sys, 4 = Buyer
 
@@ -474,12 +652,13 @@ HELP_CATEGORIES = {
         "subtitle": "Gérer les membres en vocal (déplacer, trouver, stats).",
         "sections": [
             ("👥", "Gérer les membres", [
-                ("mv @user #salon",  "Déplacer un user en vocal",          1),
-                ("bringall",         "Ramener tout le monde dans ta voc",  1),
+                ("mv @user [#salon]", "Déplacer un user (ta voc si #salon omis)", 1),
+                ("join @user",        "Te déplacer dans la voc d'un membre",      1),
+                ("bringall",          "Ramener tout le monde dans ta voc",        1),
             ]),
             ("🔍", "Voir & stats", [
-                ("find @user",       "Trouver un user en vocal",           1),
-                ("voc / vc",         "Stats vocales du serveur",           0),
+                ("find @user",        "Trouver un user en vocal",                 1),
+                ("voc / vc",          "Stats vocales du serveur",                 0),
             ]),
         ],
     },
@@ -506,8 +685,8 @@ HELP_CATEGORIES = {
         "subtitle": "Système de laisse : force un membre à te suivre en vocal.",
         "sections": [
             ("🐕", "Gérer la laisse", [
-                ("laisse @user",     "Mettre quelqu'un en laisse",  1),
-                ("unleash @user",    "Retirer la laisse",           1),
+                ("laisse @user / id", "Mettre OU retirer la laisse (toggle)", 1),
+                ("laisse",            "Voir ta liste de laisses",             1),
             ]),
         ],
     },
@@ -535,12 +714,13 @@ HELP_CATEGORIES = {
         "emoji": "🛠️",
         "label": "Système",
         "title": "Système",
-        "subtitle": "Configuration du bot (prefix, logs, limites).",
+        "subtitle": "Configuration du bot (prefix, logs, limites, auto).",
         "sections": [
             ("⚙️", "Buyer only", [
-                ("prefix [nouveau]",   "Changer le prefix",            4),
-                ("setlog #salon",      "Salon de logs",                4),
-                ("limite <rang> <n>",  "Limite de laisses par rang",   4),
+                ("prefix [nouveau]",  "Changer le prefix",                 4),
+                ("setlog #salon",     "Salon de logs",                     4),
+                ("limite",            "Modifier les limites de laisses",   4),
+                ("auto #salon / off", "Peak vocal quotidien (palmarès)",   4),
             ]),
         ],
     },
@@ -626,13 +806,13 @@ def build_vm_category_embed(category_key, rank, guild=None):
         em.add_field(
             name="💡 Fonctionnement",
             value=(
-                "La personne en laisse suit **automatiquement** le propriétaire en vocal.\n"
+                "`=laisse @user` met la laisse. Refais `=laisse @user` pour la **retirer**.\n"
+                "La personne suit **automatiquement** le propriétaire en vocal.\n"
                 "Son pseudo devient : `pseudo (🐕 de [toi])`"
             ),
             inline=False,
         )
 
-    em.set_footer(text="Made by gp ・ Voice Master")
     return em
 
 
@@ -664,7 +844,6 @@ def build_vm_hierarchy_embed(rank, guild=None):
         value="Un rang ne peut **jamais** agir sur quelqu'un de rang égal ou supérieur.",
         inline=False,
     )
-    em.set_footer(text="Made by gp ・ Voice Master")
     return em
 
 
@@ -688,7 +867,7 @@ def build_vm_home_embed(rank, guild=None):
         "prive":      "Salons privés, accès",
         "laisse":     "Mettre/retirer des laisses",
         "perms":      "Gérer les rangs (wl, owner, sys)",
-        "system":     "Config du bot (prefix, logs, limites)",
+        "system":     "Config du bot (prefix, logs, limites, auto)",
         "hierarchy":  "Qui peut faire quoi",
     }
 
@@ -711,7 +890,6 @@ def build_vm_home_embed(rank, guild=None):
     if admin_lines:
         em.add_field(name="🛠️ Staff & Admin", value="\n".join(admin_lines), inline=False)
 
-    em.set_footer(text=f"Made by gp ・ Voice Master ・ {get_french_time()}")
     return em
 
 
@@ -800,40 +978,129 @@ async def _setlog(ctx, channel: discord.TextChannel = None):
     await ctx.send(embed=success_embed("✅ Logs configurés", f"Les logs seront envoyés dans {channel.mention}."))
 
 
-RANK_ALIASES = {
-    "buyer": 4, "4": 4,
-    "sys": 3, "3": 3,
-    "owner": 2, "2": 2,
-    "wl": 1, "whitelist": 1, "1": 1,
-}
+# ---- =auto (palmarès vocal quotidien) ----
+
+@bot.command(name="auto")
+async def _auto(ctx, arg: str = None):
+    if not has_min_rank(ctx.author.id, 4):
+        return await ctx.send(embed=error_embed("❌ Permission refusée", "Seul le **Buyer** peut gérer l'auto-peak."))
+
+    # Statut
+    if arg is None:
+        ch_id = get_auto_channel(ctx.guild.id)
+        if ch_id:
+            return await ctx.send(embed=info_embed(
+                "📊 Auto-peak activé",
+                f"Le peak vocal du jour est posté dans <#{ch_id}>.\n"
+                f"`{get_prefix_cached()}auto off` pour désactiver."
+            ))
+        return await ctx.send(embed=info_embed(
+            "📊 Auto-peak désactivé",
+            f"Usage : `{get_prefix_cached()}auto #salon` pour l'activer."
+        ))
+
+    # Désactivation
+    if arg.lower() in ("off", "stop", "disable"):
+        remove_auto_channel(ctx.guild.id)
+        return await ctx.send(embed=success_embed("✅ Auto-peak désactivé", "Le palmarès quotidien est arrêté."))
+
+    # Activation
+    try:
+        channel = await commands.TextChannelConverter().convert(ctx, arg)
+    except commands.CommandError:
+        return await ctx.send(embed=error_embed("❌ Salon introuvable", "Mentionne un salon texte valide."))
+
+    set_auto_channel(ctx.guild.id, channel.id)
+    await ctx.send(embed=success_embed(
+        "✅ Auto-peak activé",
+        f"Chaque jour, le **pic de vocaux** sera posté automatiquement dans {channel.mention}.\n"
+        f"Le record du jour est mis à jour quand il est battu, et un nouveau message est créé à minuit (heure FR)."
+    ))
+    await send_log(ctx.guild, "Auto-peak configuré", ctx.author, desc=f"Salon : {channel.name}", color=0x43b581)
+
+
+# ---- =limite (éditeur interactif) ----
+
+RANK_LEVELS_EDIT = [(4, "Buyer"), (3, "Sys"), (2, "Owner"), (1, "Whitelist")]
+
+
+def build_limit_embed(guild=None, editable=True):
+    limits = get_leash_limits()
+    em = discord.Embed(
+        title="📊 Limites de laisses",
+        description=("Sélectionne un rang dans le menu pour modifier sa limite."
+                     if editable else "Limites de laisses par rang."),
+        color=embed_color(),
+    )
+    for lvl, name in RANK_LEVELS_EDIT:
+        em.add_field(name=name, value=f"**{limits.get(str(lvl), 0)}** laisse(s)", inline=True)
+    _vm_apply_thumbnail(em, guild)
+    return em
+
+
+class LimitModal(discord.ui.Modal):
+    def __init__(self, rank_level, author_id, guild):
+        super().__init__(title=f"Limite — {rank_name(rank_level)}")
+        self.rank_level = rank_level
+        self.author_id = author_id
+        self.guild = guild
+        self.value_input = discord.ui.TextInput(
+            label="Nombre de laisses",
+            placeholder="Ex: 3",
+            default=str(get_leash_limit_for_rank(rank_level)),
+            required=True,
+            max_length=4,
+        )
+        self.add_item(self.value_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        raw = self.value_input.value.strip()
+        if not raw.isdigit():
+            return await interaction.response.send_message("❌ Entre un nombre entier positif.", ephemeral=True)
+        set_leash_limit_for_rank(self.rank_level, int(raw))
+        await interaction.response.edit_message(
+            embed=build_limit_embed(self.guild),
+            view=LimitView(self.author_id, self.guild),
+        )
+
+
+class LimitSelect(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(label=name, value=str(lvl), description=f"Modifier la limite {name}")
+            for lvl, name in RANK_LEVELS_EDIT
+        ]
+        super().__init__(placeholder="Choisis un rang à modifier...", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        lvl = int(self.values[0])
+        await interaction.response.send_modal(LimitModal(lvl, self.view.author_id, self.view.guild))
+
+
+class LimitView(discord.ui.View):
+    def __init__(self, author_id, guild=None):
+        super().__init__(timeout=120)
+        self.author_id = author_id
+        self.guild = guild
+        self.add_item(LimitSelect())
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("Ce menu n'est pas à toi.", ephemeral=True)
+            return False
+        return True
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
 
 
 @bot.command(name="limite")
-async def _limite(ctx, rang: str = None, nombre: int = None):
-    # Sans argument -> afficher les limites actuelles (tout le monde peut voir)
-    if rang is None:
-        limits = get_leash_limits()
-        lines = [f"{rank_name(lvl)} : **{limits.get(str(lvl), 0)}** laisse(s)"
-                 for lvl in (4, 3, 2, 1)]
-        return await ctx.send(embed=info_embed("📊 Limites de laisses", "\n".join(lines)))
-
-    # Modifier -> Buyer uniquement
+async def _limite(ctx):
     if not has_min_rank(ctx.author.id, 4):
-        return await ctx.send(embed=error_embed("❌ Permission refusée", "Seul le **Buyer** peut modifier les limites."))
-
-    key = rang.lower().strip()
-    if key not in RANK_ALIASES:
-        return await ctx.send(embed=error_embed("❌ Rang invalide", "Rangs valides : `buyer`, `sys`, `owner`, `wl` (ou 4/3/2/1)."))
-    lvl = RANK_ALIASES[key]
-
-    if nombre is None:
-        return await ctx.send(embed=error_embed("Argument manquant", f"Usage : `{get_prefix_cached()}limite <rang> <nombre>`"))
-    if nombre < 0:
-        return await ctx.send(embed=error_embed("❌ Nombre invalide", "Le nombre doit être positif."))
-
-    set_leash_limit_for_rank(lvl, nombre)
-    await ctx.send(embed=success_embed("✅ Limite modifiée", f"Le rang **{rank_name(lvl)}** peut désormais avoir **{nombre}** laisse(s)."))
-    await send_log(ctx.guild, "Limite modifiée", ctx.author, desc=f"{rank_name(lvl)} → {nombre} laisses", color=0x43b581)
+        # Lecture seule pour les non-Buyer
+        return await ctx.send(embed=build_limit_embed(ctx.guild, editable=False))
+    await ctx.send(embed=build_limit_embed(ctx.guild), view=LimitView(ctx.author.id, ctx.guild))
 
 
 # ========================= RANGS (avec résolution par ID / ex-membres) =========================
@@ -967,13 +1234,24 @@ async def _unwl(ctx, *, user_input: str = None):
 # ========================= VOCAL =========================
 
 @bot.command(name="mv")
-async def _mv(ctx, member: discord.Member = None, channel: discord.VoiceChannel = None):
+async def _mv(ctx, member_input: str = None, channel: discord.VoiceChannel = None):
     if not has_min_rank(ctx.author.id, 1):
         return await ctx.send(embed=error_embed("❌ Permission refusée", "**Whitelist+** requis."))
-    if member is None or channel is None:
-        return await ctx.send(embed=error_embed("Arguments manquants", f"Usage : `{get_prefix_cached()}mv @user #salon`"))
+    if member_input is None:
+        return await ctx.send(embed=error_embed("Argument manquant", f"Usage : `{get_prefix_cached()}mv @user [#salon]`"))
+
+    member = await resolve_member(ctx, member_input)
+    if member is None:
+        return await ctx.send(embed=error_embed("❌ Introuvable", "Cet utilisateur n'est pas sur le serveur (mention, ID ou nom)."))
     if not member.voice:
         return await ctx.send(embed=error_embed("❌ Pas en vocal", f"{member.mention} n'est pas dans une voc."))
+
+    # Salon facultatif : si non fourni, on déplace dans la voc de l'auteur
+    if channel is None:
+        if not ctx.author.voice:
+            return await ctx.send(embed=error_embed("❌ Pas en vocal", "Tu dois être dans une voc, ou préciser un `#salon`."))
+        channel = ctx.author.voice.channel
+
     try:
         await member.move_to(channel)
         await ctx.send(embed=success_embed("✅ Déplacé", f"{member.mention} a été déplacé dans **{channel.name}**."))
@@ -982,56 +1260,54 @@ async def _mv(ctx, member: discord.Member = None, channel: discord.VoiceChannel 
         await ctx.send(embed=error_embed("❌ Permission manquante", "Je n'ai pas la permission de déplacer ce membre."))
 
 
-@bot.command(name="find")
-async def _find(ctx, member: discord.Member = None):
+@bot.command(name="join")
+async def _join(ctx, *, user_input: str = None):
     if not has_min_rank(ctx.author.id, 1):
         return await ctx.send(embed=error_embed("❌ Permission refusée", "**Whitelist+** requis."))
+    if user_input is None:
+        return await ctx.send(embed=error_embed("Argument manquant", f"Usage : `{get_prefix_cached()}join @user`"))
+
+    member = await resolve_member(ctx, user_input)
     if member is None:
-        return await ctx.send(embed=error_embed("Argument manquant", "Mentionne un utilisateur."))
+        return await ctx.send(embed=error_embed("❌ Introuvable", "Cet utilisateur n'est pas sur le serveur (mention, ID ou nom)."))
+    if not member.voice:
+        return await ctx.send(embed=error_embed("❌ Pas en vocal", f"{member.mention} n'est dans aucune voc."))
+    if not ctx.author.voice:
+        return await ctx.send(embed=error_embed("❌ Pas en vocal", "Tu dois déjà être dans une voc pour que je puisse te déplacer."))
+
+    try:
+        await ctx.author.move_to(member.voice.channel)
+        await ctx.send(embed=success_embed("✅ Rejoint", f"Tu as rejoint {member.mention} dans **{member.voice.channel.name}**."))
+        await send_log(ctx.guild, "Join", ctx.author, member, member.id, desc=f"→ {member.voice.channel.name}", color=0x43b581)
+    except discord.Forbidden:
+        await ctx.send(embed=error_embed("❌ Permission manquante", "Je n'ai pas la permission de te déplacer."))
+
+
+@bot.command(name="find")
+async def _find(ctx, *, user_input: str = None):
+    if not has_min_rank(ctx.author.id, 1):
+        return await ctx.send(embed=error_embed("❌ Permission refusée", "**Whitelist+** requis."))
+    if user_input is None:
+        return await ctx.send(embed=error_embed("Argument manquant", "Mention, ID ou nom requis."))
+
+    member = await resolve_member(ctx, user_input)
+    if member is None:
+        return await ctx.send(embed=error_embed("❌ Introuvable", "Cet utilisateur n'est pas sur le serveur (mention, ID ou nom)."))
     if not member.voice:
         return await ctx.send(embed=error_embed("❌ Pas en vocal", f"{member.mention} n'est actuellement dans aucune voc."))
+
     vc = member.voice.channel
     members_in_vc = [m.mention for m in vc.members]
     em = discord.Embed(title="🔍 Localisation vocale", color=embed_color())
     em.add_field(name="Utilisateur", value=member.mention, inline=True)
     em.add_field(name="Salon", value=f"{vc.mention}", inline=True)
     em.add_field(name="Membres présents", value=", ".join(members_in_vc) if members_in_vc else "Aucun", inline=False)
-    em.set_footer(text="Voice Master")
     await ctx.send(embed=em)
 
 
 @bot.command(name="voc", aliases=["vc"])
 async def _voc(ctx):
-    guild = ctx.guild
-    total_members = guild.member_count
-    total_boosts = guild.premium_subscription_count
-
-    all_vc_members = []
-    for vc in guild.voice_channels:
-        all_vc_members.extend(vc.members)
-
-    # En ligne : tous les membres avec status != offline
-    online = sum(1 for m in guild.members if m.status != discord.Status.offline and not m.bot)
-
-    total_in_vc = sum(1 for m in all_vc_members if not m.bot)
-    streaming = sum(1 for m in all_vc_members if m.voice and m.voice.self_stream and not m.bot)
-
-    # Format nombres avec séparateur de milliers (style 388,002)
-    def fmt(n):
-        return f"{n:,}".replace(",", ",")
-
-    em = discord.Embed(color=embed_color())
-    em.description = (
-        f"# {guild.name} Statistiques !\n\n"
-        f"*Membres* **: {fmt(total_members)}**\n"
-        f"*En ligne* **: {fmt(online)}**\n"
-        f"*En Vocal* **: {fmt(total_in_vc)}**\n"
-        f"*En stream* **: {fmt(streaming)}**\n"
-        f"*Boost* **: {fmt(total_boosts)}**"
-    )
-    if guild.icon:
-        em.set_thumbnail(url=guild.icon.url)
-    await ctx.send(embed=em)
+    await ctx.send(embed=build_stats_embed(ctx.guild))
 
 
 @bot.command(name="bringall")
@@ -1128,11 +1404,11 @@ async def _unpv(ctx, channel_id: str = None):
 
 
 @bot.command(name="acces")
-async def _acces(ctx, member: discord.Member = None):
+async def _acces(ctx, *, user_input: str = None):
     if not has_min_rank(ctx.author.id, 1):
         return await ctx.send(embed=error_embed("❌ Permission refusée", "**Whitelist+** requis."))
-    if member is None:
-        return await ctx.send(embed=error_embed("Argument manquant", "Mentionne un utilisateur."))
+    if user_input is None:
+        return await ctx.send(embed=error_embed("Argument manquant", "Mention, ID ou nom requis."))
     if not ctx.author.voice:
         return await ctx.send(embed=error_embed("❌ Pas en vocal", "Tu dois être dans ta voc privée."))
 
@@ -1143,28 +1419,79 @@ async def _acces(ctx, member: discord.Member = None):
     if str(ctx.author.id) != pvc["owner_id"] and not has_min_rank(ctx.author.id, 3):
         return await ctx.send(embed=error_embed("❌ Permission refusée", "Seul le propriétaire peut donner l'accès."))
 
-    add_vc_access(vc.id, member.id)
-    try:
-        await vc.set_permissions(member, connect=True)
-    except discord.Forbidden:
-        pass
-    await ctx.send(embed=success_embed("✅ Accès accordé", f"{member.mention} peut maintenant rejoindre {vc.mention}."))
+    display, uid = await resolve_user_or_id(ctx, user_input)
+    if uid is None:
+        return await ctx.send(embed=error_embed("❌ Utilisateur introuvable", "Mention, ID ou nom requis."))
+
+    add_vc_access(vc.id, uid)
+    member = ctx.guild.get_member(uid)
+    if member:
+        try:
+            await vc.set_permissions(member, connect=True)
+        except discord.Forbidden:
+            pass
+    await ctx.send(embed=success_embed(
+        "✅ Accès accordé",
+        f"{format_user_display(display, uid)} peut maintenant rejoindre {vc.mention}."
+    ))
 
 
-# ========================= LAISSE =========================
+# ========================= LAISSE (toggle + liste) =========================
 
 @bot.command(name="laisse")
-async def _laisse(ctx, member: discord.Member = None):
+async def _laisse(ctx, *, user_input: str = None):
     if not has_min_rank(ctx.author.id, 1):
         return await ctx.send(embed=error_embed("❌ Permission refusée", "**Whitelist+** requis."))
+
+    # === Sans argument : afficher ma liste de laisses ===
+    if user_input is None:
+        leashes = get_leashes_by_owner(ctx.author.id)
+        limit = get_leash_limit_for_rank(get_rank_db(ctx.author.id))
+        if not leashes:
+            return await ctx.send(embed=info_embed(
+                "🐕 Tes laisses",
+                f"Tu n'as personne en laisse. *(0/{limit})*"
+            ))
+        lines = [f"• <@{l['target_id']}>" for l in leashes]
+        return await ctx.send(embed=info_embed(
+            f"🐕 Tes laisses ({len(leashes)}/{limit})",
+            "\n".join(lines)
+        ))
+
+    display, uid = await resolve_user_or_id(ctx, user_input)
+    if uid is None:
+        return await ctx.send(embed=error_embed("❌ Utilisateur introuvable", "Mention, ID ou nom requis."))
+
+    leash = get_leash(uid)
+
+    # === Déjà en laisse -> on retire (toggle) ===
+    if leash:
+        if str(ctx.author.id) != leash["owner_id"] and not has_min_rank(ctx.author.id, 3):
+            return await ctx.send(embed=error_embed(
+                "❌ Permission refusée",
+                "Seul le propriétaire de la laisse ou un **Sys+** peut la retirer."
+            ))
+
+        remove_leash(uid)
+        member = ctx.guild.get_member(uid)
+        if member:
+            try:
+                await member.edit(nick=leash["original_nick"] if leash["original_nick"] != member.name else None)
+            except discord.Forbidden:
+                pass
+
+        await ctx.send(embed=success_embed("✅ Laisse retirée", f"{format_user_display(display, uid)} est libre !"))
+        await send_log(ctx.guild, "Laisse retirée", ctx.author, display, uid, color=0x43b581)
+        return
+
+    # === Pas en laisse -> on met la laisse ===
+    member = ctx.guild.get_member(uid)
     if member is None:
-        return await ctx.send(embed=error_embed("Argument manquant", "Mentionne un utilisateur."))
+        return await ctx.send(embed=error_embed("❌ Pas sur le serveur", "La personne doit être sur le serveur pour être mise en laisse."))
     if member == ctx.author:
         return await ctx.send(embed=error_embed("❌ Erreur", "Tu ne peux pas te mettre toi-même en laisse."))
-    if get_leash(member.id):
-        return await ctx.send(embed=error_embed("Déjà en laisse", f"{member.mention} est déjà en laisse."))
 
-    # Vérif limite de laisses selon le rang
+    # Vérif limite selon le rang
     rank = get_rank_db(ctx.author.id)
     limit = get_leash_limit_for_rank(rank)
     current = len(get_leashes_by_owner(ctx.author.id))
@@ -1177,7 +1504,6 @@ async def _laisse(ctx, member: discord.Member = None):
 
     original_nick = member.nick or member.name
     new_nick = f"{member.name} (🐕 de {ctx.author.display_name})"
-
     if len(new_nick) > 32:
         new_nick = new_nick[:32]
 
@@ -1191,34 +1517,10 @@ async def _laisse(ctx, member: discord.Member = None):
     await ctx.send(embed=success_embed(
         "🐕 En laisse !",
         f"{member.mention} est maintenant en laisse de {ctx.author.mention}.\n"
-        f"Il suivra automatiquement dans les vocs."
+        f"Il suivra automatiquement dans les vocs.\n"
+        f"*Refais `{get_prefix_cached()}laisse {member.mention}` pour la retirer.*"
     ))
     await send_log(ctx.guild, "Laisse", ctx.author, member, member.id, color=0xfaa61a)
-
-
-@bot.command(name="unleash")
-async def _unleash(ctx, member: discord.Member = None):
-    if not has_min_rank(ctx.author.id, 1):
-        return await ctx.send(embed=error_embed("❌ Permission refusée", "**Whitelist+** requis."))
-    if member is None:
-        return await ctx.send(embed=error_embed("Argument manquant", "Mentionne un utilisateur."))
-
-    leash = get_leash(member.id)
-    if not leash:
-        return await ctx.send(embed=error_embed("Pas en laisse", f"{member.mention} n'est pas en laisse."))
-
-    if str(ctx.author.id) != leash["owner_id"] and not has_min_rank(ctx.author.id, 3):
-        return await ctx.send(embed=error_embed("❌ Permission refusée", "Seul le propriétaire de la laisse ou un **Sys+** peut la retirer."))
-
-    remove_leash(member.id)
-
-    try:
-        await member.edit(nick=leash["original_nick"] if leash["original_nick"] != member.name else None)
-    except discord.Forbidden:
-        pass
-
-    await ctx.send(embed=success_embed("✅ Laisse retirée", f"{member.mention} est libre !"))
-    await send_log(ctx.guild, "Laisse retirée", ctx.author, member, member.id, color=0x43b581)
 
 
 # ========================= ERROR HANDLING =========================
