@@ -74,6 +74,11 @@ def init_db():
         owner_id TEXT NOT NULL,
         guild_id TEXT NOT NULL
     )""")
+    # Migration : on mémorise la perm "connect" d'origine de @everyone pour la restaurer exactement
+    try:
+        c.execute("ALTER TABLE private_vcs ADD COLUMN prev_connect TEXT")
+    except sqlite3.OperationalError:
+        pass
 
     c.execute("""CREATE TABLE IF NOT EXISTS vc_access (
         channel_id TEXT,
@@ -107,11 +112,17 @@ def init_db():
     conn.close()
 
 
+# ---- Config (cache mémoire : plus de requête SQLite à chaque événement vocal) ----
+_config_cache = {}
+
+
 def get_config(key):
-    conn = get_db()
-    row = conn.execute("SELECT value FROM config WHERE key = ?", (key,)).fetchone()
-    conn.close()
-    return row["value"] if row else None
+    if key not in _config_cache:
+        conn = get_db()
+        row = conn.execute("SELECT value FROM config WHERE key = ?", (key,)).fetchone()
+        conn.close()
+        _config_cache[key] = row["value"] if row else None
+    return _config_cache[key]
 
 
 def set_config(key, value):
@@ -119,6 +130,7 @@ def set_config(key, value):
     conn.execute("INSERT OR REPLACE INTO config VALUES (?, ?)", (key, str(value)))
     conn.commit()
     conn.close()
+    _config_cache[key] = str(value)
     if key == "prefix":
         _prefix_cache["value"] = str(value)
 
@@ -210,33 +222,43 @@ def get_prefix_cached():
     return _prefix_cache["value"]
 
 
+# ---- Rangs (cache mémoire) ----
+_rank_cache = {}
+
+
+def _load_ranks():
+    conn = get_db()
+    rows = conn.execute("SELECT user_id, rank FROM ranks").fetchall()
+    conn.close()
+    _rank_cache.clear()
+    _rank_cache.update({r["user_id"]: r["rank"] for r in rows})
+
+
 def get_rank_db(user_id):
     buyer_ids_raw = get_config("buyer_ids")
     if buyer_ids_raw:
-        buyer_ids = json.loads(buyer_ids_raw)
-        if str(user_id) in buyer_ids:
-            return 4
-    conn = get_db()
-    row = conn.execute("SELECT rank FROM ranks WHERE user_id = ?", (str(user_id),)).fetchone()
-    conn.close()
-    return row["rank"] if row else 0
+        try:
+            if str(user_id) in json.loads(buyer_ids_raw):
+                return 4
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return _rank_cache.get(str(user_id), 0)
 
 
 def set_rank_db(user_id, rank):
     conn = get_db()
     if rank == 0:
         conn.execute("DELETE FROM ranks WHERE user_id = ?", (str(user_id),))
+        _rank_cache.pop(str(user_id), None)
     else:
         conn.execute("INSERT OR REPLACE INTO ranks VALUES (?, ?)", (str(user_id), rank))
+        _rank_cache[str(user_id)] = rank
     conn.commit()
     conn.close()
 
 
 def get_ranks_by_level(level):
-    conn = get_db()
-    rows = conn.execute("SELECT user_id FROM ranks WHERE rank = ?", (level,)).fetchall()
-    conn.close()
-    return [r["user_id"] for r in rows]
+    return [uid for uid, r in _rank_cache.items() if r == level]
 
 
 def get_log_channel(guild_id):
@@ -253,13 +275,25 @@ def set_log_channel(guild_id, channel_id):
     conn.close()
 
 
-# ---- Leashes ----
+# ---- Leashes (cache mémoire : lu à chaque événement vocal + toutes les 5s) ----
+_leash_cache = {"rows": None}
+
+
+def _all_leashes():
+    if _leash_cache["rows"] is None:
+        conn = get_db()
+        _leash_cache["rows"] = [dict(r) for r in conn.execute("SELECT * FROM leashes").fetchall()]
+        conn.close()
+    return _leash_cache["rows"]
+
+
 def add_leash(target_id, owner_id, original_nick):
     conn = get_db()
     conn.execute("INSERT OR REPLACE INTO leashes VALUES (?, ?, ?)",
                  (str(target_id), str(owner_id), original_nick))
     conn.commit()
     conn.close()
+    _leash_cache["rows"] = None
 
 
 def remove_leash(target_id):
@@ -267,27 +301,23 @@ def remove_leash(target_id):
     conn.execute("DELETE FROM leashes WHERE target_id = ?", (str(target_id),))
     conn.commit()
     conn.close()
+    _leash_cache["rows"] = None
 
 
 def get_leash(target_id):
-    conn = get_db()
-    row = conn.execute("SELECT * FROM leashes WHERE target_id = ?", (str(target_id),)).fetchone()
-    conn.close()
-    return dict(row) if row else None
+    return next((l for l in _all_leashes() if l["target_id"] == str(target_id)), None)
 
 
 def get_leashes_by_owner(owner_id):
-    conn = get_db()
-    rows = conn.execute("SELECT * FROM leashes WHERE owner_id = ?", (str(owner_id),)).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+    return [l for l in _all_leashes() if l["owner_id"] == str(owner_id)]
 
 
 # ---- Private VCs ----
-def add_private_vc(channel_id, owner_id, guild_id):
+def add_private_vc(channel_id, owner_id, guild_id, prev_connect=None):
+    prev = "" if prev_connect is None else ("1" if prev_connect else "0")
     conn = get_db()
-    conn.execute("INSERT OR REPLACE INTO private_vcs VALUES (?, ?, ?)",
-                 (str(channel_id), str(owner_id), str(guild_id)))
+    conn.execute("INSERT OR REPLACE INTO private_vcs (channel_id, owner_id, guild_id, prev_connect) VALUES (?, ?, ?, ?)",
+                 (str(channel_id), str(owner_id), str(guild_id), prev))
     conn.commit()
     conn.close()
 
@@ -307,6 +337,13 @@ def get_private_vc(channel_id):
     return dict(row) if row else None
 
 
+def get_all_private_vcs():
+    conn = get_db()
+    rows = conn.execute("SELECT * FROM private_vcs").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
 def add_vc_access(channel_id, user_id):
     conn = get_db()
     conn.execute("INSERT OR IGNORE INTO vc_access VALUES (?, ?)", (str(channel_id), str(user_id)))
@@ -316,10 +353,11 @@ def add_vc_access(channel_id, user_id):
 
 def remove_vc_access(channel_id, user_id):
     conn = get_db()
-    conn.execute("DELETE FROM vc_access WHERE channel_id = ? AND user_id = ?",
-                 (str(channel_id), str(user_id)))
+    cur = conn.execute("DELETE FROM vc_access WHERE channel_id = ? AND user_id = ?",
+                       (str(channel_id), str(user_id)))
     conn.commit()
     conn.close()
+    return cur.rowcount > 0
 
 
 def get_vc_access(channel_id):
@@ -442,6 +480,8 @@ def compute_stats(guild):
     all_vc_members = []
     for vc in guild.voice_channels:
         all_vc_members.extend(vc.members)
+    for st in guild.stage_channels:
+        all_vc_members.extend(st.members)
 
     online = sum(1 for m in guild.members if m.status != discord.Status.offline and not m.bot)
     total_in_vc = sum(1 for m in all_vc_members if not m.bot)
@@ -560,6 +600,7 @@ async def resolve_member(ctx, user_input):
 # ========================= BOT SETUP =========================
 
 init_db()
+_load_ranks()
 intents = discord.Intents.all()
 
 
@@ -568,6 +609,11 @@ def get_prefix(bot, message):
 
 
 bot = commands.Bot(command_prefix=get_prefix, intents=intents, help_command=None)
+
+
+@bot.check
+async def _guild_only(ctx):
+    return ctx.guild is not None
 
 
 # ========================= LOG =========================
@@ -591,16 +637,71 @@ async def send_log(guild, action, author, target_display=None, target_id=None, d
         log.warning(f"send_log: échec d'envoi : {e}")
 
 
+# ========================= SALONS PRIVÉS (logique commune) =========================
+
+def can_join_private(member, pvc):
+    """Qui a le droit d'être dans une voc privée."""
+    if member.bot or get_rank_db(member.id) >= 3:
+        return True  # bots + Sys/Buyer
+    uid = str(member.id)
+    if uid == pvc["owner_id"] or uid in get_vc_access(pvc["channel_id"]):
+        return True
+    # Les membres en laisse du propriétaire le suivent : on ne les éjecte pas
+    leash = get_leash(member.id)
+    return bool(leash and leash["owner_id"] == pvc["owner_id"])
+
+
+async def make_public(vc, pvc, reason):
+    """Remet la voc publique : restaure la perm d'origine de @everyone et nettoie les accès ajoutés."""
+    guild = vc.guild
+    prev = pvc.get("prev_connect")
+    prev_val = None if not prev else (prev == "1")
+    try:
+        ow = vc.overwrites_for(guild.default_role)
+        ow.connect = prev_val
+        await vc.set_permissions(guild.default_role, overwrite=None if ow.is_empty() else ow, reason=reason)
+    except discord.HTTPException:
+        pass
+    # Retire les "connect" individuels que le bot a posés (proprio + accès)
+    for uid in set(get_vc_access(vc.id)) | {pvc["owner_id"]}:
+        m = guild.get_member(int(uid))
+        if m is None or m not in vc.overwrites:
+            continue
+        ow = vc.overwrites_for(m)
+        ow.connect = None
+        try:
+            await vc.set_permissions(m, overwrite=None if ow.is_empty() else ow, reason=reason)
+        except discord.HTTPException:
+            pass
+    remove_private_vc(vc.id)
+
+
 # ========================= EVENTS =========================
 
 @bot.event
 async def on_ready():
     log.info(f"Bot connecté : {bot.user} ({bot.user.id})")
     log.info(f"Prefix : {get_prefix_cached()}")
+    # Nettoyage : vocs privées dont le salon n'existe plus ou dont le proprio est parti pendant un redémarrage
+    for pvc in get_all_private_vcs():
+        guild = bot.get_guild(int(pvc["guild_id"]))
+        vc = guild.get_channel(int(pvc["channel_id"])) if guild else None
+        if vc is None:
+            if guild is not None:
+                remove_private_vc(pvc["channel_id"])
+            continue
+        if not any(str(m.id) == pvc["owner_id"] for m in vc.members):
+            await make_public(vc, pvc, "Voice Master : proprio absent (redémarrage)")
     if not leash_follow.is_running():
         leash_follow.start()
     if not auto_peak_loop.is_running():
         auto_peak_loop.start()
+
+
+@bot.event
+async def on_guild_channel_delete(channel):
+    if get_private_vc(channel.id):
+        remove_private_vc(channel.id)
 
 
 @bot.event
@@ -609,17 +710,13 @@ async def on_voice_state_update(member, before, after):
     if before.channel and before.channel != after.channel:
         pvc = get_private_vc(before.channel.id)
         if pvc and str(member.id) == pvc["owner_id"]:
-            try:
-                await before.channel.set_permissions(member.guild.default_role, connect=None)
-            except discord.HTTPException:
-                pass
-            remove_private_vc(before.channel.id)
+            await make_public(before.channel, pvc, "Voice Master : le proprio a quitté")
             await send_log(member.guild, "Salon auto-public", member,
                            desc=f"Le proprio a quitté : {before.channel.name}", color=0x43b581)
 
     # Leash follow : si le owner rejoint une voc, les leashs le rejoignent
-    leashes = get_leashes_by_owner(member.id)
-    if leashes and after.channel and after.channel != before.channel:
+    if after.channel and after.channel != before.channel:
+        leashes = get_leashes_by_owner(member.id)
         guild = member.guild
         for leash in leashes:
             target = guild.get_member(int(leash["target_id"]))
@@ -630,39 +727,40 @@ async def on_voice_state_update(member, before, after):
                     pass
 
     # Vérif accès voc privée
-    if after.channel:
+    if after.channel and after.channel != before.channel:
         pvc = get_private_vc(after.channel.id)
-        if pvc:
-            allowed = get_vc_access(after.channel.id)
-            allowed.append(pvc["owner_id"])
-            if str(member.id) not in allowed:
+        if pvc and not can_join_private(member, pvc):
+            try:
+                await member.move_to(None)
                 try:
-                    await member.move_to(None)
-                    try:
-                        await member.send(embed=error_embed("🔒 Salon privé", "Tu n'as pas accès à ce salon vocal."))
-                    except discord.HTTPException:
-                        pass
+                    await member.send(embed=error_embed("🔒 Salon privé", "Tu n'as pas accès à ce salon vocal."))
                 except discord.HTTPException:
                     pass
+            except discord.HTTPException:
+                pass
 
 
 @tasks.loop(seconds=5)
 async def leash_follow():
-    """Boucle de suivi des leashs"""
+    """Boucle de suivi des leashs (filet de sécurité si un event a été raté)"""
+    rows = _all_leashes()
+    if not rows:
+        return
     for guild in bot.guilds:
-        conn = get_db()
-        rows = conn.execute("SELECT * FROM leashes").fetchall()
-        conn.close()
         for row in rows:
             owner = guild.get_member(int(row["owner_id"]))
             target = guild.get_member(int(row["target_id"]))
-            if owner and target:
-                if owner.voice and target.voice:
-                    if owner.voice.channel != target.voice.channel:
-                        try:
-                            await target.move_to(owner.voice.channel)
-                        except discord.HTTPException:
-                            pass
+            if owner and target and owner.voice and target.voice:
+                if owner.voice.channel != target.voice.channel:
+                    try:
+                        await target.move_to(owner.voice.channel)
+                    except discord.HTTPException:
+                        pass
+
+
+@leash_follow.before_loop
+async def before_leash_follow():
+    await bot.wait_until_ready()
 
 
 @tasks.loop(seconds=30)
@@ -752,6 +850,8 @@ HELP_CATEGORIES = {
             ]),
             ("👤", "Accès", [
                 ("acces @user",      "Donner accès à ta voc privée",        1),
+                ("unacces @user",    "Retirer l'accès (et l'éjecter)",      1),
+                ("acces",            "Voir qui a accès à ta voc",           1),
             ]),
         ],
     },
@@ -856,10 +956,18 @@ def build_vm_category_embed(category_key, rank, guild=None):
         em.add_field(
             name="💡 Fonctionnement",
             value=(
-                "`=laisse @user` met la laisse. Refais `=laisse @user` pour la **retirer**.\n"
-                "La personne suit **automatiquement** le propriétaire en vocal.\n"
+                f"`{p}laisse @user` met la laisse. Refais `{p}laisse @user` pour la **retirer**.\n"
+                "La personne suit **automatiquement** le propriétaire en vocal (même en voc privée).\n"
                 "Son pseudo devient : `pseudo (🐕 de [toi])`"
             ),
+            inline=False,
+        )
+    elif category_key == "prive":
+        em.add_field(
+            name="💡 Fonctionnement",
+            value="La voc redevient **publique automatiquement** quand tu la quittes, "
+                  "et ses permissions d'origine sont restaurées.\n"
+                  "Les **Sys+**, les bots et tes membres en laisse peuvent toujours entrer.",
             inline=False,
         )
 
@@ -948,12 +1056,13 @@ class HelpView(discord.ui.View):
         self.author_id = author_id
         self.rank = rank
         self.guild = guild
+        self.message = None
         self.add_item(HelpDropdown(rank, guild=guild))
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author_id:
             await interaction.response.send_message(
-                "Ce menu n'est pas à toi. Fais `=help` pour voir le tien.", ephemeral=True
+                f"Ce menu n'est pas à toi. Fais `{get_prefix_cached()}help` pour voir le tien.", ephemeral=True
             )
             return False
         return True
@@ -961,6 +1070,11 @@ class HelpView(discord.ui.View):
     async def on_timeout(self):
         for item in self.children:
             item.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
 
 
 @bot.command(name="help")
@@ -969,7 +1083,7 @@ async def _help(ctx):
     if rank < 1:
         return  # Aucun rang -> la commande ne fait rien
     view = HelpView(ctx.author.id, rank, guild=ctx.guild)
-    await ctx.send(embed=build_vm_home_embed(rank, guild=ctx.guild), view=view)
+    view.message = await ctx.send(embed=build_vm_home_embed(rank, guild=ctx.guild), view=view)
 
 
 # ========================= SYSTÈME =========================
@@ -1450,7 +1564,7 @@ async def _find(ctx, *, user_input: str = None):
     em = discord.Embed(title="🔍 Localisation vocale", color=embed_color())
     em.add_field(name="Utilisateur", value=member.mention, inline=True)
     em.add_field(name="Salon", value=f"{vc.mention}", inline=True)
-    em.add_field(name="Membres présents", value=", ".join(members_in_vc) if members_in_vc else "Aucun", inline=False)
+    em.add_field(name="Membres présents", value=(", ".join(members_in_vc) if members_in_vc else "Aucun")[:1024], inline=False)
     await ctx.send(embed=em)
 
 
@@ -1474,8 +1588,8 @@ async def _bringall(ctx):
     moved = 0
     failed = 0
     for vc in public_vcs:
-        for member in vc.members:
-            if member == ctx.author:
+        for member in list(vc.members):
+            if member == ctx.author or member.bot:
                 continue
             try:
                 await member.move_to(target_vc)
@@ -1504,9 +1618,10 @@ async def _pv(ctx):
         return await ctx.send(embed=error_embed("Déjà privé", "Ce salon est déjà privé."))
 
     try:
+        prev_connect = vc.overwrites_for(ctx.guild.default_role).connect
         await vc.set_permissions(ctx.guild.default_role, connect=False)
         await vc.set_permissions(ctx.author, connect=True)
-        add_private_vc(vc.id, ctx.author.id, ctx.guild.id)
+        add_private_vc(vc.id, ctx.author.id, ctx.guild.id, prev_connect)
         await ctx.send(embed=success_embed(
             "🔒 Salon privé",
             f"{vc.mention} est maintenant **privé**.\n"
@@ -1525,7 +1640,7 @@ async def _unpv(ctx, channel_id: str = None):
 
     if channel_id:
         try:
-            vc = ctx.guild.get_channel(int(channel_id))
+            vc = ctx.guild.get_channel(int(channel_id.strip("<#>")))
         except ValueError:
             return await ctx.send(embed=error_embed("❌ ID invalide", "L'ID fourni n'est pas valide."))
     else:
@@ -1543,28 +1658,35 @@ async def _unpv(ctx, channel_id: str = None):
     if str(ctx.author.id) != pvc["owner_id"] and not has_min_rank(ctx.author.id, 3):
         return await ctx.send(embed=error_embed("❌ Permission refusée", "Seul le propriétaire du salon ou un **Sys+** peut retirer le privé."))
 
-    try:
-        await vc.set_permissions(ctx.guild.default_role, connect=None)
-        remove_private_vc(vc.id)
-        await ctx.send(embed=success_embed("🔓 Salon public", f"{vc.mention} est maintenant **public**."))
-        await send_log(ctx.guild, "Salon rendu public", ctx.author, desc=f"Salon : {vc.name}", color=0x43b581)
-    except discord.Forbidden:
-        await ctx.send(embed=error_embed("❌ Permission manquante", "Je n'ai pas la permission de modifier ce salon."))
+    await make_public(vc, pvc, f"Voice Master : unpv par {ctx.author}")
+    await ctx.send(embed=success_embed("🔓 Salon public", f"{vc.mention} est maintenant **public**."))
+    await send_log(ctx.guild, "Salon rendu public", ctx.author, desc=f"Salon : {vc.name}", color=0x43b581)
+
+
+def _my_private_vc(ctx):
+    """Retourne (vc, pvc) si l'auteur est dans une voc privée qu'il gère, sinon (vc, None)."""
+    if not ctx.author.voice:
+        return None, None
+    vc = ctx.author.voice.channel
+    return vc, get_private_vc(vc.id)
 
 
 @bot.command(name="acces")
 async def _acces(ctx, *, user_input: str = None):
     if not has_min_rank(ctx.author.id, 1):
         return await ctx.send(embed=error_embed("❌ Permission refusée", "**Whitelist+** requis."))
-    if user_input is None:
-        return await ctx.send(embed=error_embed("Argument manquant", "Mention, ID ou nom requis."))
-    if not ctx.author.voice:
+    vc, pvc = _my_private_vc(ctx)
+    if vc is None:
         return await ctx.send(embed=error_embed("❌ Pas en vocal", "Tu dois être dans ta voc privée."))
-
-    vc = ctx.author.voice.channel
-    pvc = get_private_vc(vc.id)
     if not pvc:
         return await ctx.send(embed=error_embed("Pas privé", "Ce salon n'est pas privé."))
+
+    # Sans argument : liste des accès
+    if user_input is None:
+        ids = get_vc_access(vc.id)
+        lines = [f"👑 <@{pvc['owner_id']}> *(propriétaire)*"] + [f"• <@{u}>" for u in ids]
+        return await ctx.send(embed=info_embed(f"🔒 Accès à {vc.name} ({len(ids)})", "\n".join(lines)[:4000]))
+
     if str(ctx.author.id) != pvc["owner_id"] and not has_min_rank(ctx.author.id, 3):
         return await ctx.send(embed=error_embed("❌ Permission refusée", "Seul le propriétaire peut donner l'accès."))
 
@@ -1583,6 +1705,43 @@ async def _acces(ctx, *, user_input: str = None):
         "✅ Accès accordé",
         f"{format_user_display(display, uid)} peut maintenant rejoindre {vc.mention}."
     ))
+
+
+@bot.command(name="unacces")
+async def _unacces(ctx, *, user_input: str = None):
+    if not has_min_rank(ctx.author.id, 1):
+        return await ctx.send(embed=error_embed("❌ Permission refusée", "**Whitelist+** requis."))
+    if user_input is None:
+        return await ctx.send(embed=error_embed("Argument manquant", "Mention, ID ou nom requis."))
+    vc, pvc = _my_private_vc(ctx)
+    if vc is None:
+        return await ctx.send(embed=error_embed("❌ Pas en vocal", "Tu dois être dans ta voc privée."))
+    if not pvc:
+        return await ctx.send(embed=error_embed("Pas privé", "Ce salon n'est pas privé."))
+    if str(ctx.author.id) != pvc["owner_id"] and not has_min_rank(ctx.author.id, 3):
+        return await ctx.send(embed=error_embed("❌ Permission refusée", "Seul le propriétaire peut retirer l'accès."))
+
+    display, uid = await resolve_user_or_id(ctx, user_input)
+    if uid is None:
+        return await ctx.send(embed=error_embed("❌ Utilisateur introuvable", "Mention, ID ou nom requis."))
+    if not remove_vc_access(vc.id, uid):
+        return await ctx.send(embed=error_embed("Pas d'accès", f"{format_user_display(display, uid)} n'avait pas accès."))
+
+    member = ctx.guild.get_member(uid)
+    if member:
+        try:
+            ow = vc.overwrites_for(member)
+            ow.connect = None
+            await vc.set_permissions(member, overwrite=None if ow.is_empty() else ow)
+        except discord.HTTPException:
+            pass
+        # On l'éjecte s'il est dedans et qu'il n'a plus le droit d'y être
+        if member.voice and member.voice.channel == vc and not can_join_private(member, pvc):
+            try:
+                await member.move_to(None)
+            except discord.HTTPException:
+                pass
+    await ctx.send(embed=success_embed("✅ Accès retiré", f"{format_user_display(display, uid)} n'a plus accès à {vc.mention}."))
 
 
 # ========================= LAISSE (toggle + liste) =========================
@@ -1627,7 +1786,7 @@ async def _laisse(ctx, *, user_input: str = None):
         if member:
             try:
                 await member.edit(nick=leash["original_nick"] if leash["original_nick"] != member.name else None)
-            except discord.Forbidden:
+            except discord.HTTPException:
                 pass
 
         await ctx.send(embed=success_embed("✅ Laisse retirée", f"{format_user_display(display, uid)} est libre !"))
@@ -1640,6 +1799,10 @@ async def _laisse(ctx, *, user_input: str = None):
         return await ctx.send(embed=error_embed("❌ Pas sur le serveur", "La personne doit être sur le serveur pour être mise en laisse."))
     if member == ctx.author:
         return await ctx.send(embed=error_embed("❌ Erreur", "Tu ne peux pas te mettre toi-même en laisse."))
+    if member.bot:
+        return await ctx.send(embed=error_embed("❌ Erreur", "Impossible de mettre un bot en laisse."))
+    if get_leash(ctx.author.id):
+        return await ctx.send(embed=error_embed("❌ Erreur", "Tu es toi-même en laisse, tu ne peux pas en mettre une."))
 
     # Tu ne peux pas mettre en laisse quelqu'un d'un rang SUPÉRIEUR (égal et inférieur OK)
     rank = get_rank_db(ctx.author.id)
@@ -1670,8 +1833,15 @@ async def _laisse(ctx, *, user_input: str = None):
 
     try:
         await member.edit(nick=new_nick)
-    except discord.Forbidden:
+    except discord.HTTPException:
         pass
+
+    # Si les deux sont déjà en vocal, on le ramène tout de suite
+    if member.voice and ctx.author.voice and member.voice.channel != ctx.author.voice.channel:
+        try:
+            await member.move_to(ctx.author.voice.channel)
+        except discord.HTTPException:
+            pass
 
     await ctx.send(embed=success_embed(
         "🐕 En laisse !",
@@ -1689,17 +1859,19 @@ async def on_command_error(ctx, error):
     if isinstance(error, commands.CommandInvokeError):
         error = error.original
 
-    if isinstance(error, (commands.MemberNotFound, commands.UserNotFound)):
+    if isinstance(error, commands.CheckFailure):
+        pass
+    elif isinstance(error, (commands.MemberNotFound, commands.UserNotFound)):
         await ctx.send(embed=error_embed("❌ Utilisateur introuvable", "Impossible de trouver cet utilisateur."))
     elif isinstance(error, commands.MissingRequiredArgument):
         await ctx.send(embed=error_embed(
             "❌ Argument manquant",
             f"Il te manque l'argument : `{error.param.name}`."
         ))
-    elif isinstance(error, commands.BadArgument):
-        await ctx.send(embed=error_embed("❌ Argument invalide", str(error)))
     elif isinstance(error, commands.ChannelNotFound):
         await ctx.send(embed=error_embed("❌ Salon introuvable", "Impossible de trouver ce salon."))
+    elif isinstance(error, commands.BadArgument):
+        await ctx.send(embed=error_embed("❌ Argument invalide", str(error)))
     elif isinstance(error, commands.CommandNotFound):
         pass
     else:
